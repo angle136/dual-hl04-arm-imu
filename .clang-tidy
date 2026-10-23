@@ -1,0 +1,39 @@
+Checks: >
+  # 核心安全性与防错检查
+  bugprone-*,
+  cert-*,
+  misc-const-correctness,
+
+  # 性能与可移植性
+  performance-*,
+  portability-*,
+
+  # 可读性
+  readability-container-size-empty,
+  readability-delete-null-pointer,
+  readability-redundant-control-flow,
+  readability-static-accessed-through-instance,
+  readability-string-compare,
+
+  # 明确禁用的干扰项\
+  -bugprone-easily-swappable-parameters,
+  -bugprone-reserved-identifier,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -cert-err33-c,
+  -performance-no-int-to-ptr,
+  -clang-diagnostic-*
+
+FormatStyle: file
+HeaderFilterRegex: '.*(app|modules|utils|bsp)/.*\.(h|hpp)'
+WarningsAsErrors: '*'
+
+CheckOptions:
+  - key: readability-braces-around-statements.ShortStatementLines
+    value: '0'
+  - key: readability-simplify-boolean-expr.ChainedConditionalAssignment
+    value: '0'
+  - key: readability-simplify-boolean-expr.ChainedConditionalReturn
+    value: '0'
+  - key: bugprone-signed-char-misuse.CharTypedefsToIgnore
+    value: 'uint8_t'

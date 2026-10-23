@@ -1,0 +1,17 @@
+CompileFlags:
+  Add:
+    - -mthumb
+    - -mfloat-abi=hard
+    - -std=gnu11
+    - -ffreestanding
+    - -fno-common
+    - -fno-exceptions
+Completion:
+  AllScopes: true
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true
+  Designators: true
+Hover:
+  ShowAKA: true
