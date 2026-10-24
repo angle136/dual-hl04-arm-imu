@@ -5,7 +5,7 @@
 - This repository has no root CMake project; configure from a board source directory (`board/dji_c`, `board/damiao_h7`, or `board/f103_c8`) and use the ARM bare-metal GCC toolchain.
 - Required host tools are `cmake`, `ninja`, and `arm-none-eabi-gcc`; `ccache` is used automatically when installed. `cppcheck` is required only when explicitly configured with `-DMAS_REQUIRE_CPPCHECK=ON`.
 - A focused build is:
-  `cmake -S board/dji_c -B build/dji_c/Debug --preset Debug -DROBOT=infantry3 -DBOARD=single`
+  `cmake -S board/dji_c -B build/dji_c/Debug --preset Debug -DROBOT=arm -DBOARD=single`
   followed by `cmake --build build/dji_c/Debug -j "$(nproc)"`.
 - `ROBOT` and `BOARD` are CMake cache variables. Existing build directories retain old values, so override them with `-D...` or use a new/remove the build directory when switching configurations.
 - Configuration generates `robot_def.h` and `module_config.h` under the build directory; do not edit generated headers. The firmware ELF is `build/<board>/<config>/base.elf`.

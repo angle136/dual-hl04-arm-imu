@@ -103,14 +103,14 @@ git clone git@github.com:HebutMas/mas_embedded_threadx.git // ssh
 编辑 `apps/config.cmake` 中的默认值：
 
 ```cmake
-set(ROBOT "sentry" CACHE STRING "Target robot")  # hero / engineer / infantry3 / infantry4 / infantry5 / drone / sentry / darts / customcontrol
-set(BOARD "gimbal" CACHE STRING "Board role")    # single / gimbal / chassis
+set(ROBOT "arm" CACHE STRING "Target robot")   # arm / arm_dual_imu
+set(BOARD "single" CACHE STRING "Board role")  # single / gimbal / chassis
 ```
 
 也可不改文件，配置时用命令行覆盖（缓存变量，适合 CI 和多配置切换）：
 
 ```bash
-cmake -S board/dji_c -B build/dji_c/Debug --preset Debug -DROBOT=infantry3 -DBOARD=single
+cmake -S board/dji_c -B build/dji_c/Debug --preset Debug -DROBOT=arm -DBOARD=single
 ```
 
 > 注意：已配置过的 build 目录以缓存值为准，切换时用 `-DROBOT=...` 覆盖或删除 build 目录。
