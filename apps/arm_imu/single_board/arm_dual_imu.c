@@ -27,6 +27,7 @@
 #define ARM_DUAL_IMU_HL04_FRAME_CAPACITY ARM_HL04_UART_RAW_FRAME_CAPACITY
 #define ARM_DUAL_IMU_UART_BUFFER_SIZE    256U
 #define ARM_DUAL_IMU_READ_BUFFER_SIZE    128U
+#define ARM_DUAL_IMU_CAN_FILTER_BANK     14U
 #define ARM_DUAL_IMU_QUAT_NORM_MIN_SQ    0.25f
 #define ARM_DUAL_IMU_QUAT_NORM_MAX_SQ    2.25f
 #define ARM_DUAL_IMU_SINGULAR_EPSILON    1.0e-4f
@@ -55,7 +56,6 @@ typedef struct
 typedef struct
 {
     UART_Device         *uart;
-    Can_Device          *forearm_can;
     Arm_Hl04_Parser_t    parser;
     Arm_Dual_Imu_State_t state;
     float                upper_zero_transpose[3][3];
@@ -458,14 +458,13 @@ static uint8_t arm_hl04_parser_feed(Arm_Hl04_Parser_t *parser, uint8_t byte, Arm
     return 0U;
 }
 
-static void arm_hl04_can_rx_callback(Can_Device *device, const uint8_t *bytes, uint8_t length)
+static void arm_hl04_can_decode(Arm_Dual_Imu_Context_t *context, uint32_t can_id, const uint8_t *bytes, uint8_t length)
 {
-    Arm_Dual_Imu_Context_t *context = (Arm_Dual_Imu_Context_t *)device->user_arg;
     if (context == NULL || bytes == NULL) return;
 
     Arm_Hl04_Can_Data_t data = {0};
     data.last_rx_tick        = tx_time_get();
-    data.can_id              = device->rx_id;
+    data.can_id              = can_id;
     data.dlc                 = length;
     context->forearm_packet_count++;
     data.packet_count = context->forearm_packet_count;
@@ -499,6 +498,52 @@ static void arm_hl04_can_rx_callback(Can_Device *device, const uint8_t *bytes, u
     data.frame_error_count = context->forearm_frame_error_count;
     data.frame_valid       = 1U;
     arm_hl04_can_publish(&data);
+}
+
+static uint8_t arm_hl04_can_init(void)
+{
+    const uint32_t    extended_id = ARM_DUAL_IMU_CAN_RX_ID;
+    CAN_FilterTypeDef filter      = {
+             .FilterMode           = CAN_FILTERMODE_IDMASK,
+             .FilterScale          = CAN_FILTERSCALE_32BIT,
+             .FilterFIFOAssignment = CAN_FILTER_FIFO0,
+             .FilterBank           = ARM_DUAL_IMU_CAN_FILTER_BANK,
+             .SlaveStartFilterBank = ARM_DUAL_IMU_CAN_FILTER_BANK,
+             .FilterIdHigh         = (uint16_t)(extended_id >> 13U),
+             .FilterIdLow          = (uint16_t)((extended_id << 3U) | CAN_ID_EXT),
+             .FilterMaskIdHigh     = 0xFFFFU,
+             .FilterMaskIdLow      = 0xFFFCU,
+             .FilterActivation     = CAN_FILTER_ENABLE,
+    };
+
+    BSP_CAN_HANDLE2->Init.Prescaler = ARM_DUAL_IMU_CAN_PRESCALER;
+    if (HAL_CAN_Init(BSP_CAN_HANDLE2) != HAL_OK) return 0U;
+    if (HAL_CAN_ConfigFilter(BSP_CAN_HANDLE2, &filter) != HAL_OK) return 0U;
+    if (HAL_CAN_Start(BSP_CAN_HANDLE2) != HAL_OK) return 0U;
+    return 1U;
+}
+
+static void arm_hl04_can_poll(Arm_Dual_Imu_Context_t *context)
+{
+    while (HAL_CAN_GetRxFifoFillLevel(BSP_CAN_HANDLE2, CAN_RX_FIFO0) > 0U)
+    {
+        CAN_RxHeaderTypeDef rx_header;
+        uint8_t             rx_data[ARM_HL04_CAN_RAW_FRAME_SIZE];
+        if (HAL_CAN_GetRxMessage(BSP_CAN_HANDLE2, CAN_RX_FIFO0, &rx_header, rx_data) != HAL_OK)
+        {
+            context->forearm_frame_error_count++;
+            continue;
+        }
+
+        if (rx_header.IDE != CAN_ID_EXT || rx_header.ExtId != ARM_DUAL_IMU_CAN_RX_ID || rx_header.RTR != CAN_RTR_DATA ||
+            rx_header.DLC != ARM_HL04_CAN_RAW_FRAME_SIZE)
+        {
+            context->forearm_frame_error_count++;
+            continue;
+        }
+
+        arm_hl04_can_decode(context, rx_header.ExtId, rx_data, (uint8_t)rx_header.DLC);
+    }
 }
 
 static void arm_dual_imu_publish(const Arm_Dual_Imu_State_t *state)
@@ -625,6 +670,7 @@ static void arm_dual_imu_task_entry(ULONG thread_input)
                 }
             }
         }
+        arm_hl04_can_poll(&g_arm_dual_imu_context);
         arm_dual_imu_calculate(&g_arm_dual_imu_context);
     }
 }
@@ -662,17 +708,9 @@ void arm_dual_imu_init(void)
         return;
     }
 
-    Can_Device_Init_Config_s can_config = {
-        .hcan        = BSP_CAN_HANDLE2,
-        .tx_id       = 0U,
-        .rx_id       = ARM_DUAL_IMU_CAN_RX_ID,
-        .rx_callback = arm_hl04_can_rx_callback,
-        .user_arg    = &g_arm_dual_imu_context,
-    };
-    g_arm_dual_imu_context.forearm_can = BSP_CAN_Device_Init(&can_config);
-    if (g_arm_dual_imu_context.forearm_can == NULL)
+    if (arm_hl04_can_init() == 0U)
     {
-        LOG_E("forearm HL04 CAN2 registration failed: rx_id=0x%03X", ARM_DUAL_IMU_CAN_RX_ID);
+        LOG_E("forearm HL04 CAN2 init failed: rx_id=0x%08lX", (unsigned long)ARM_DUAL_IMU_CAN_RX_ID);
         return;
     }
 
@@ -684,8 +722,8 @@ void arm_dual_imu_init(void)
         return;
     }
 
-    LOG_I("dual HL04 initialized: upper UART baud=%lu, forearm CAN2 id=0x%03X, auto zero=%u", (unsigned long)ARM_DUAL_IMU_UART_BAUD,
-          ARM_DUAL_IMU_CAN_RX_ID, (unsigned)ARM_DUAL_IMU_AUTO_ZERO_ENABLE);
+    LOG_I("dual HL04 initialized: upper UART baud=%lu, forearm CAN2 500k J1939 id=0x%08lX, auto zero=%u", (unsigned long)ARM_DUAL_IMU_UART_BAUD,
+          (unsigned long)ARM_DUAL_IMU_CAN_RX_ID, (unsigned)ARM_DUAL_IMU_AUTO_ZERO_ENABLE);
 }
 
 void arm_dual_imu_request_zero(void) { g_arm_dual_imu_context.zero_requested = 1U; }

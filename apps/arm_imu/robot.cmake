@@ -9,8 +9,9 @@ set(MODULES_CHASSIS "")
 set(ARM_DUAL_IMU_ENABLE             1)
 set(ARM_DUAL_IMU_UART               huart1)
 set(ARM_DUAL_IMU_UART_BAUD          921600)
-# 原作者 CAN 回调中留下的 HL04 ID 线索为 0x17；设备端 ID 不同时只改这里。
-set(ARM_DUAL_IMU_CAN_RX_ID          0x17)
+# HL04 出厂默认：J1939、500 kbit/s、节点 0x08、四元数 PGN 0xFF46。
+set(ARM_DUAL_IMU_CAN_RX_ID          0x0CFF4608)
+set(ARM_DUAL_IMU_CAN_PRESCALER      6)
 set(ARM_DUAL_IMU_TASK_STACK_SIZE    2048)
 set(ARM_DUAL_IMU_TASK_PRIORITY      11)
 set(ARM_DUAL_IMU_READ_TIMEOUT_MS    2)
