@@ -1,8 +1,8 @@
 #include "arm_dual_imu.h"
 
+#include "bsp_can.h"
 #include "bsp_def.h"
 #include "bsp_uart.h"
-#include "module_ins.h"
 #include "tx_api.h"
 #include "usart.h"
 
@@ -10,7 +10,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#define LOG_TAG "arm_dual_imu"
+#define LOG_TAG "arm_imu"
 #define LOG_LVL LOG_LVL_INFO
 #include "ulog_def.h"
 
@@ -23,7 +23,8 @@
 #define ARM_DUAL_IMU_HL04_TAG            0x91U
 #define ARM_DUAL_IMU_HL04_MIN_PAYLOAD    76U
 #define ARM_DUAL_IMU_HL04_MAX_PAYLOAD    92U
-#define ARM_DUAL_IMU_HL04_FRAME_CAPACITY 100U
+#define ARM_DUAL_IMU_HL04_FRAME_OVERHEAD 6U
+#define ARM_DUAL_IMU_HL04_FRAME_CAPACITY ARM_HL04_UART_RAW_FRAME_CAPACITY
 #define ARM_DUAL_IMU_UART_BUFFER_SIZE    256U
 #define ARM_DUAL_IMU_READ_BUFFER_SIZE    128U
 #define ARM_DUAL_IMU_QUAT_NORM_MIN_SQ    0.25f
@@ -48,21 +49,21 @@ typedef struct
     uint16_t                payload_length;
     uint16_t                expected_length;
     uint32_t                packet_count;
-    uint32_t                crc_error_count;
     uint32_t                frame_error_count;
 } Arm_Hl04_Parser_t;
 
 typedef struct
 {
     UART_Device         *uart;
+    Can_Device          *forearm_can;
     Arm_Hl04_Parser_t    parser;
     Arm_Dual_Imu_State_t state;
     float                upper_zero_transpose[3][3];
     float                forearm_zero_transpose[3][3];
     float                previous_joint_target[ARM_DUAL_IMU_IK_DOF];
-    uint32_t             upper_last_rx_tick;
     uint32_t             both_ready_since_tick;
-    uint8_t              have_upper_quaternion;
+    volatile uint32_t    forearm_packet_count;
+    volatile uint32_t    forearm_frame_error_count;
     uint8_t              have_previous_joint_target;
     uint8_t              calibrated;
     volatile uint8_t     zero_requested;
@@ -73,7 +74,10 @@ APPS_STACK_SECTION static uint8_t g_arm_dual_imu_stack[ARM_DUAL_IMU_TASK_STACK_S
 BUFFER_SECTION static uint8_t     g_arm_dual_imu_uart_buffer[ARM_DUAL_IMU_UART_BUFFER_SIZE];
 static Arm_Dual_Imu_Context_t     g_arm_dual_imu_context;
 
-volatile Arm_Dual_Imu_State_t g_arm_dual_imu_state;
+volatile Arm_Dual_Imu_State_t      g_arm_dual_imu_state;
+volatile Arm_Hl04_Uart_Data_t      g_upper_hl04_uart_data;
+volatile Arm_Hl04_Uart_Raw_Frame_t g_upper_hl04_uart_raw_frame;
+volatile Arm_Hl04_Can_Data_t       g_forearm_hl04_can_data;
 
 static float arm_dual_imu_clampf(float value, float minimum, float maximum)
 {
@@ -257,44 +261,126 @@ static uint8_t arm_dual_imu_solve_legacy_ik(Arm_Dual_Imu_Context_t *context, con
     return 1U;
 }
 
-static uint16_t arm_hl04_crc16_update(uint16_t crc, const uint8_t *data, uint16_t length)
+static float arm_hl04_read_float(const uint8_t *bytes)
 {
-    for (uint16_t byte_index = 0U; byte_index < length; ++byte_index)
-    {
-        crc ^= (uint16_t)data[byte_index] << 8U;
-        for (uint8_t bit = 0U; bit < 8U; ++bit) crc = (crc & 0x8000U) != 0U ? (uint16_t)((crc << 1U) ^ 0x1021U) : (uint16_t)(crc << 1U);
-    }
-    return crc;
+    float value;
+    memcpy(&value, bytes, sizeof(value));
+    return value;
 }
 
-static uint8_t arm_hl04_decode_frame(Arm_Hl04_Parser_t *parser, float quaternion[4])
+static uint32_t arm_hl04_read_u32(const uint8_t *bytes)
 {
-    uint16_t crc        = arm_hl04_crc16_update(0U, parser->frame, 4U);
-    crc                 = arm_hl04_crc16_update(crc, &parser->frame[6], parser->payload_length);
-    uint16_t packet_crc = (uint16_t)((uint16_t)parser->frame[parser->expected_length - 2U] << 8U) | parser->frame[parser->expected_length - 1U];
-    if (crc != packet_crc)
+    uint32_t value;
+    memcpy(&value, bytes, sizeof(value));
+    return value;
+}
+
+static void arm_hl04_uart_raw_frame_publish(const Arm_Hl04_Parser_t *parser)
+{
+    uint32_t odd_sequence = (g_upper_hl04_uart_raw_frame.sequence + 1U) | 1U;
+
+    g_upper_hl04_uart_raw_frame.sequence = odd_sequence;
+    __DMB();
+    g_upper_hl04_uart_raw_frame.capture_count++;
+    g_upper_hl04_uart_raw_frame.payload_length = parser->payload_length;
+    g_upper_hl04_uart_raw_frame.frame_length   = parser->expected_length;
+    memcpy((void *)g_upper_hl04_uart_raw_frame.raw_frame, parser->frame, parser->expected_length);
+    if (parser->expected_length < ARM_DUAL_IMU_HL04_FRAME_CAPACITY)
     {
-        parser->crc_error_count++;
-        return 0U;
+        memset((void *)&g_upper_hl04_uart_raw_frame.raw_frame[parser->expected_length], 0,
+               ARM_DUAL_IMU_HL04_FRAME_CAPACITY - parser->expected_length);
     }
+    __DMB();
+    g_upper_hl04_uart_raw_frame.sequence = odd_sequence + 1U;
+}
+
+static void arm_hl04_uart_publish(const Arm_Hl04_Uart_Data_t *data)
+{
+    const size_t payload_offset     = offsetof(Arm_Hl04_Uart_Data_t, last_rx_tick);
+    uint32_t     odd_sequence       = (g_upper_hl04_uart_data.sequence + 1U) | 1U;
+    g_upper_hl04_uart_data.sequence = odd_sequence;
+    __DMB();
+    memcpy((uint8_t *)(void *)&g_upper_hl04_uart_data + payload_offset, (const uint8_t *)data + payload_offset, sizeof(*data) - payload_offset);
+    __DMB();
+    g_upper_hl04_uart_data.sequence = odd_sequence + 1U;
+}
+
+static void arm_hl04_can_publish(const Arm_Hl04_Can_Data_t *data)
+{
+    const size_t payload_offset      = offsetof(Arm_Hl04_Can_Data_t, last_rx_tick);
+    uint32_t     odd_sequence        = (g_forearm_hl04_can_data.sequence + 1U) | 1U;
+    g_forearm_hl04_can_data.sequence = odd_sequence;
+    __DMB();
+    memcpy((uint8_t *)(void *)&g_forearm_hl04_can_data + payload_offset, (const uint8_t *)data + payload_offset, sizeof(*data) - payload_offset);
+    __DMB();
+    g_forearm_hl04_can_data.sequence = odd_sequence + 1U;
+}
+
+static uint8_t arm_hl04_uart_snapshot(Arm_Hl04_Uart_Data_t *data)
+{
+    for (uint8_t attempt = 0U; attempt < 4U; ++attempt)
+    {
+        uint32_t sequence_before = g_upper_hl04_uart_data.sequence;
+        if ((sequence_before & 1U) != 0U) continue;
+        __DMB();
+        memcpy(data, (const void *)&g_upper_hl04_uart_data, sizeof(*data));
+        __DMB();
+        if (sequence_before == g_upper_hl04_uart_data.sequence) return 1U;
+    }
+    return 0U;
+}
+
+static uint8_t arm_hl04_can_snapshot(Arm_Hl04_Can_Data_t *data)
+{
+    for (uint8_t attempt = 0U; attempt < 4U; ++attempt)
+    {
+        uint32_t sequence_before = g_forearm_hl04_can_data.sequence;
+        if ((sequence_before & 1U) != 0U) continue;
+        __DMB();
+        memcpy(data, (const void *)&g_forearm_hl04_can_data, sizeof(*data));
+        __DMB();
+        if (sequence_before == g_forearm_hl04_can_data.sequence) return 1U;
+    }
+    return 0U;
+}
+
+static uint8_t arm_hl04_decode_frame(Arm_Hl04_Parser_t *parser, Arm_Hl04_Uart_Data_t *data)
+{
+    arm_hl04_uart_raw_frame_publish(parser);
     if (parser->frame[6] != ARM_DUAL_IMU_HL04_TAG)
     {
         parser->frame_error_count++;
         return 0U;
     }
 
-    float decoded[4];
-    memcpy(&decoded[0], &parser->frame[66], sizeof(float));
-    memcpy(&decoded[1], &parser->frame[70], sizeof(float));
-    memcpy(&decoded[2], &parser->frame[74], sizeof(float));
-    memcpy(&decoded[3], &parser->frame[78], sizeof(float));
-    if (arm_dual_imu_normalize_quaternion(decoded, quaternion) == 0U)
+    memset(data, 0, sizeof(*data));
+    data->last_rx_tick     = tx_time_get();
+    data->payload_length   = parser->payload_length;
+    data->frame_length     = parser->expected_length;
+    data->tag              = parser->frame[6];
+    data->pressure         = arm_hl04_read_float(&parser->frame[10]);
+    data->sensor_timestamp = arm_hl04_read_u32(&parser->frame[14]);
+    memcpy(data->raw_frame, parser->frame, parser->expected_length);
+    for (uint8_t i = 0U; i < 3U; ++i)
+    {
+        data->acceleration[i]     = arm_hl04_read_float(&parser->frame[18U + 4U * i]);
+        data->angular_velocity[i] = arm_hl04_read_float(&parser->frame[30U + 4U * i]);
+        data->magnetic_field[i]   = arm_hl04_read_float(&parser->frame[42U + 4U * i]);
+        data->euler[i]            = arm_hl04_read_float(&parser->frame[54U + 4U * i]);
+    }
+    for (uint8_t i = 0U; i < 4U; ++i) data->quaternion[i] = arm_hl04_read_float(&parser->frame[66U + 4U * i]);
+
+    float normalized[4];
+    if (arm_dual_imu_normalize_quaternion(data->quaternion, normalized) == 0U)
     {
         parser->frame_error_count++;
         return 0U;
     }
 
     parser->packet_count++;
+    data->packet_count      = parser->packet_count;
+    data->frame_error_count = parser->frame_error_count;
+    data->frame_valid       = 1U;
     return 1U;
 }
 
@@ -306,7 +392,7 @@ static void arm_hl04_parser_reset(Arm_Hl04_Parser_t *parser)
     parser->expected_length = 0U;
 }
 
-static uint8_t arm_hl04_parser_feed(Arm_Hl04_Parser_t *parser, uint8_t byte, float quaternion[4])
+static uint8_t arm_hl04_parser_feed(Arm_Hl04_Parser_t *parser, uint8_t byte, Arm_Hl04_Uart_Data_t *data)
 {
     switch (parser->state)
     {
@@ -342,7 +428,7 @@ static uint8_t arm_hl04_parser_feed(Arm_Hl04_Parser_t *parser, uint8_t byte, flo
         parser->frame[3]        = byte;
         parser->index           = 4U;
         parser->payload_length  = (uint16_t)parser->frame[2] | ((uint16_t)parser->frame[3] << 8U);
-        parser->expected_length = (uint16_t)(parser->payload_length + 8U);
+        parser->expected_length = (uint16_t)(parser->payload_length + ARM_DUAL_IMU_HL04_FRAME_OVERHEAD);
         if (parser->payload_length < ARM_DUAL_IMU_HL04_MIN_PAYLOAD || parser->payload_length > ARM_DUAL_IMU_HL04_MAX_PAYLOAD ||
             parser->expected_length > ARM_DUAL_IMU_HL04_FRAME_CAPACITY)
         {
@@ -359,7 +445,7 @@ static uint8_t arm_hl04_parser_feed(Arm_Hl04_Parser_t *parser, uint8_t byte, flo
         parser->frame[parser->index++] = byte;
         if (parser->index == parser->expected_length)
         {
-            uint8_t decoded = arm_hl04_decode_frame(parser, quaternion);
+            uint8_t decoded = arm_hl04_decode_frame(parser, data);
             arm_hl04_parser_reset(parser);
             return decoded;
         }
@@ -370,6 +456,49 @@ static uint8_t arm_hl04_parser_feed(Arm_Hl04_Parser_t *parser, uint8_t byte, flo
         break;
     }
     return 0U;
+}
+
+static void arm_hl04_can_rx_callback(Can_Device *device, const uint8_t *bytes, uint8_t length)
+{
+    Arm_Dual_Imu_Context_t *context = (Arm_Dual_Imu_Context_t *)device->user_arg;
+    if (context == NULL || bytes == NULL) return;
+
+    Arm_Hl04_Can_Data_t data = {0};
+    data.last_rx_tick        = tx_time_get();
+    data.can_id              = device->rx_id;
+    data.dlc                 = length;
+    context->forearm_packet_count++;
+    data.packet_count = context->forearm_packet_count;
+
+    uint8_t copy_length = length > ARM_HL04_CAN_RAW_FRAME_SIZE ? ARM_HL04_CAN_RAW_FRAME_SIZE : length;
+    memcpy(data.raw_frame, bytes, copy_length);
+    if (length != ARM_HL04_CAN_RAW_FRAME_SIZE)
+    {
+        context->forearm_frame_error_count++;
+        data.frame_error_count = context->forearm_frame_error_count;
+        arm_hl04_can_publish(&data);
+        return;
+    }
+
+    for (uint8_t i = 0U; i < 4U; ++i)
+    {
+        uint16_t packed        = (uint16_t)bytes[2U * i] | ((uint16_t)bytes[2U * i + 1U] << 8U);
+        data.raw_quaternion[i] = (int16_t)packed;
+        data.quaternion[i]     = (float)data.raw_quaternion[i] * 0.0001f;
+    }
+
+    float normalized[4];
+    if (arm_dual_imu_normalize_quaternion(data.quaternion, normalized) == 0U)
+    {
+        context->forearm_frame_error_count++;
+        data.frame_error_count = context->forearm_frame_error_count;
+        arm_hl04_can_publish(&data);
+        return;
+    }
+
+    data.frame_error_count = context->forearm_frame_error_count;
+    data.frame_valid       = 1U;
+    arm_hl04_can_publish(&data);
 }
 
 static void arm_dual_imu_publish(const Arm_Dual_Imu_State_t *state)
@@ -397,18 +526,31 @@ static void arm_dual_imu_calculate(Arm_Dual_Imu_Context_t *context)
 {
     Arm_Dual_Imu_State_t *state = &context->state;
     const ULONG           now   = tx_time_get();
-    const Ins_t          *ins   = Module_INS_get();
+    Arm_Hl04_Uart_Data_t  upper_data;
+    Arm_Hl04_Can_Data_t   forearm_data;
     float                 upper_raw[3][3];
     float                 forearm_raw[3][3];
 
-    state->initialized             = 1U;
-    state->upper_last_rx_tick      = context->upper_last_rx_tick;
-    state->upper_packet_count      = context->parser.packet_count;
-    state->upper_crc_error_count   = context->parser.crc_error_count;
-    state->upper_frame_error_count = context->parser.frame_error_count;
-    state->upper_imu_valid = (context->have_upper_quaternion != 0U && (now - context->upper_last_rx_tick) <= ARM_DUAL_IMU_UPPER_TIMEOUT_MS) ? 1U : 0U;
+    uint8_t upper_snapshot_valid   = arm_hl04_uart_snapshot(&upper_data);
+    uint8_t forearm_snapshot_valid = arm_hl04_can_snapshot(&forearm_data);
+
+    state->initialized               = 1U;
+    state->upper_last_rx_tick        = upper_snapshot_valid != 0U ? upper_data.last_rx_tick : 0U;
+    state->upper_packet_count        = context->parser.packet_count;
+    state->upper_frame_error_count   = context->parser.frame_error_count;
+    state->forearm_last_rx_tick      = forearm_snapshot_valid != 0U ? forearm_data.last_rx_tick : 0U;
+    state->forearm_packet_count      = context->forearm_packet_count;
+    state->forearm_frame_error_count = context->forearm_frame_error_count;
+    state->upper_imu_valid =
+        (upper_snapshot_valid != 0U && upper_data.frame_valid != 0U && (now - upper_data.last_rx_tick) <= ARM_DUAL_IMU_UPPER_TIMEOUT_MS &&
+         arm_dual_imu_normalize_quaternion(upper_data.quaternion, state->upper_quaternion) != 0U)
+            ? 1U
+            : 0U;
     state->forearm_imu_valid =
-        (ins != NULL && ins->initialized != 0U && arm_dual_imu_normalize_quaternion(ins->q, state->forearm_quaternion) != 0U) ? 1U : 0U;
+        (forearm_snapshot_valid != 0U && forearm_data.frame_valid != 0U && (now - forearm_data.last_rx_tick) <= ARM_DUAL_IMU_FOREARM_TIMEOUT_MS &&
+         arm_dual_imu_normalize_quaternion(forearm_data.quaternion, state->forearm_quaternion) != 0U)
+            ? 1U
+            : 0U;
 
     if (state->upper_imu_valid != 0U) arm_dual_imu_quaternion_to_rotation(state->upper_quaternion, upper_raw);
     if (state->forearm_imu_valid != 0U) arm_dual_imu_quaternion_to_rotation(state->forearm_quaternion, forearm_raw);
@@ -476,12 +618,10 @@ static void arm_dual_imu_task_entry(ULONG thread_input)
         {
             for (uint32_t i = 0U; i < read_length; ++i)
             {
-                float quaternion[4];
-                if (arm_hl04_parser_feed(&g_arm_dual_imu_context.parser, read_buffer[i], quaternion) != 0U)
+                Arm_Hl04_Uart_Data_t data;
+                if (arm_hl04_parser_feed(&g_arm_dual_imu_context.parser, read_buffer[i], &data) != 0U)
                 {
-                    memcpy(g_arm_dual_imu_context.state.upper_quaternion, quaternion, sizeof(quaternion));
-                    g_arm_dual_imu_context.have_upper_quaternion = 1U;
-                    g_arm_dual_imu_context.upper_last_rx_tick    = tx_time_get();
+                    arm_hl04_uart_publish(&data);
                 }
             }
         }
@@ -493,6 +633,9 @@ void arm_dual_imu_init(void)
 {
     memset(&g_arm_dual_imu_context, 0, sizeof(g_arm_dual_imu_context));
     memset((void *)&g_arm_dual_imu_state, 0, sizeof(g_arm_dual_imu_state));
+    memset((void *)&g_upper_hl04_uart_data, 0, sizeof(g_upper_hl04_uart_data));
+    memset((void *)&g_upper_hl04_uart_raw_frame, 0, sizeof(g_upper_hl04_uart_raw_frame));
+    memset((void *)&g_forearm_hl04_can_data, 0, sizeof(g_forearm_hl04_can_data));
     arm_hl04_parser_reset(&g_arm_dual_imu_context.parser);
     arm_dual_imu_matrix_identity(g_arm_dual_imu_context.upper_zero_transpose);
     arm_dual_imu_matrix_identity(g_arm_dual_imu_context.forearm_zero_transpose);
@@ -519,16 +662,30 @@ void arm_dual_imu_init(void)
         return;
     }
 
-    UINT status =
-        tx_thread_create(&g_arm_dual_imu_thread, "arm_dual_imu", arm_dual_imu_task_entry, 0U, g_arm_dual_imu_stack, sizeof(g_arm_dual_imu_stack),
-                         ARM_DUAL_IMU_TASK_PRIORITY, ARM_DUAL_IMU_TASK_PRIORITY, TX_NO_TIME_SLICE, TX_AUTO_START);
+    Can_Device_Init_Config_s can_config = {
+        .hcan        = BSP_CAN_HANDLE2,
+        .tx_id       = 0U,
+        .rx_id       = ARM_DUAL_IMU_CAN_RX_ID,
+        .rx_callback = arm_hl04_can_rx_callback,
+        .user_arg    = &g_arm_dual_imu_context,
+    };
+    g_arm_dual_imu_context.forearm_can = BSP_CAN_Device_Init(&can_config);
+    if (g_arm_dual_imu_context.forearm_can == NULL)
+    {
+        LOG_E("forearm HL04 CAN2 registration failed: rx_id=0x%03X", ARM_DUAL_IMU_CAN_RX_ID);
+        return;
+    }
+
+    UINT status = tx_thread_create(&g_arm_dual_imu_thread, "arm_imu", arm_dual_imu_task_entry, 0U, g_arm_dual_imu_stack, sizeof(g_arm_dual_imu_stack),
+                                   ARM_DUAL_IMU_TASK_PRIORITY, ARM_DUAL_IMU_TASK_PRIORITY, TX_NO_TIME_SLICE, TX_AUTO_START);
     if (status != TX_SUCCESS)
     {
         LOG_E("dual IMU thread create failed: %u", (unsigned)status);
         return;
     }
 
-    LOG_I("dual IMU initialized: HL04 baud=%lu, auto zero=%u", (unsigned long)ARM_DUAL_IMU_UART_BAUD, (unsigned)ARM_DUAL_IMU_AUTO_ZERO_ENABLE);
+    LOG_I("dual HL04 initialized: upper UART baud=%lu, forearm CAN2 id=0x%03X, auto zero=%u", (unsigned long)ARM_DUAL_IMU_UART_BAUD,
+          ARM_DUAL_IMU_CAN_RX_ID, (unsigned)ARM_DUAL_IMU_AUTO_ZERO_ENABLE);
 }
 
 void arm_dual_imu_request_zero(void) { g_arm_dual_imu_context.zero_requested = 1U; }
@@ -552,21 +709,4 @@ uint8_t arm_dual_imu_get_state(Arm_Dual_Imu_State_t *state)
         }
     }
     return 0U;
-}
-
-void arm_dual_imu_log_status(void)
-{
-    Arm_Dual_Imu_State_t state;
-    if (arm_dual_imu_get_state(&state) == 0U)
-    {
-        LOG_W("snapshot busy");
-        return;
-    }
-
-    LOG_I("upper=%u forearm=%u cal=%u pose=%u ik=%u pkt=%lu crc=%lu frame=%lu p=[%.3f %.3f %.3f] q=[%.3f %.3f %.3f %.3f %.3f %.3f]",
-          (unsigned)state.upper_imu_valid, (unsigned)state.forearm_imu_valid, (unsigned)state.calibrated, (unsigned)state.pose_valid,
-          (unsigned)state.ik_valid, (unsigned long)state.upper_packet_count, (unsigned long)state.upper_crc_error_count,
-          (unsigned long)state.upper_frame_error_count, state.target_position_m[0], state.target_position_m[1], state.target_position_m[2],
-          state.legacy_joint_target_rad[0], state.legacy_joint_target_rad[1], state.legacy_joint_target_rad[2], state.legacy_joint_target_rad[3],
-          state.legacy_joint_target_rad[4], state.legacy_joint_target_rad[5]);
 }

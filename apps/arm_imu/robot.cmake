@@ -1,17 +1,21 @@
-# 双 IMU 机械臂 APP：板载 BMI088/INS 作为前臂，USART1 HL04 作为大臂。
+# 双 HL04 机械臂 APP：USART1 接大臂，CAN2 接前臂。
 
 include(${CMAKE_CURRENT_LIST_DIR}/../../modules/module_config.cmake)
 
-set(MODULES_SINGLE BMI088 INS)
+set(MODULES_SINGLE "")
 set(MODULES_GIMBAL "")
 set(MODULES_CHASSIS "")
 
 set(ARM_DUAL_IMU_ENABLE             1)
 set(ARM_DUAL_IMU_UART               huart1)
 set(ARM_DUAL_IMU_UART_BAUD          921600)
+# 原作者 CAN 回调中留下的 HL04 ID 线索为 0x17；设备端 ID 不同时只改这里。
+set(ARM_DUAL_IMU_CAN_RX_ID          0x17)
 set(ARM_DUAL_IMU_TASK_STACK_SIZE    2048)
 set(ARM_DUAL_IMU_TASK_PRIORITY      11)
 set(ARM_DUAL_IMU_READ_TIMEOUT_MS    2)
 set(ARM_DUAL_IMU_UPPER_TIMEOUT_MS   100)
+set(ARM_DUAL_IMU_FOREARM_TIMEOUT_MS 100)
 set(ARM_DUAL_IMU_AUTO_ZERO_ENABLE   1)
 set(ARM_DUAL_IMU_AUTO_ZERO_DELAY_MS 1000)
+set(ARM_IMU_DEBUG_ENABLE            1)

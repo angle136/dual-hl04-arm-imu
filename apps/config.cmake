@@ -3,8 +3,8 @@
 # 注意：已配置过的 build 目录以缓存值为准，改本文件默认值不影响旧 build 目录
 
 # 目标机器人 & 板型
-set(ROBOT "arm" CACHE STRING "Target robot")
-set_property(CACHE ROBOT PROPERTY STRINGS arm arm_dual_imu)
+set(ROBOT "arm_imu" CACHE STRING "Target robot")
+set_property(CACHE ROBOT PROPERTY STRINGS arm arm_imu)
 set(BOARD "single" CACHE STRING "Board role")
 set_property(CACHE BOARD PROPERTY STRINGS single gimbal chassis)
 
@@ -22,16 +22,19 @@ set(ARM_GRAVITY_REMOTE_GUARD_ENABLE 0)
 # ARM 软件角度/raw 限位默认开启；apps/<robot>/robot.cmake 可按目标机器人覆盖。
 set(ARM_SOFTWARE_LIMIT_ENABLE 1)
 
-# 双 IMU 机械臂 APP 参数默认关闭；apps/arm_dual_imu/robot.cmake 覆盖。
+# 双 HL04 机械臂 APP 参数默认关闭；apps/arm_imu/robot.cmake 覆盖。
 set(ARM_DUAL_IMU_ENABLE             0)
 set(ARM_DUAL_IMU_UART               huart1)
 set(ARM_DUAL_IMU_UART_BAUD          921600)
+set(ARM_DUAL_IMU_CAN_RX_ID          0x17)
 set(ARM_DUAL_IMU_TASK_STACK_SIZE    2048)
 set(ARM_DUAL_IMU_TASK_PRIORITY      11)
 set(ARM_DUAL_IMU_READ_TIMEOUT_MS    2)
 set(ARM_DUAL_IMU_UPPER_TIMEOUT_MS   100)
+set(ARM_DUAL_IMU_FOREARM_TIMEOUT_MS 100)
 set(ARM_DUAL_IMU_AUTO_ZERO_ENABLE   0)
 set(ARM_DUAL_IMU_AUTO_ZERO_DELAY_MS 1000)
+set(ARM_IMU_DEBUG_ENABLE            0)
 
 # 加载机器人差异配置
 include(${CMAKE_CURRENT_LIST_DIR}/${ROBOT}/robot.cmake)
