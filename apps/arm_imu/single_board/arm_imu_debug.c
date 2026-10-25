@@ -50,6 +50,15 @@ static void arm_imu_debug_log_status(void)
           (unsigned)state.calibrated, (unsigned)state.pose_valid, (unsigned)state.ik_valid);
     LOG_I("rx uart[pkt=%lu frame=%lu] can[pkt=%lu frame=%lu]", (unsigned long)state.upper_packet_count, (unsigned long)state.upper_frame_error_count,
           (unsigned long)state.forearm_packet_count, (unsigned long)state.forearm_frame_error_count);
+    LOG_I("can bus[all=%lu std=%lu ext=%lu ignored=%lu] last[id=0x%08lX ext=%u dlc=%u data=%02X %02X %02X %02X %02X %02X %02X %02X]",
+          (unsigned long)g_forearm_hl04_can_bus_debug.total_frame_count, (unsigned long)g_forearm_hl04_can_bus_debug.standard_frame_count,
+          (unsigned long)g_forearm_hl04_can_bus_debug.extended_frame_count, (unsigned long)g_forearm_hl04_can_bus_debug.ignored_frame_count,
+          (unsigned long)g_forearm_hl04_can_bus_debug.can_id, (unsigned)g_forearm_hl04_can_bus_debug.is_extended,
+          (unsigned)g_forearm_hl04_can_bus_debug.dlc, (unsigned)g_forearm_hl04_can_bus_debug.raw_frame[0],
+          (unsigned)g_forearm_hl04_can_bus_debug.raw_frame[1], (unsigned)g_forearm_hl04_can_bus_debug.raw_frame[2],
+          (unsigned)g_forearm_hl04_can_bus_debug.raw_frame[3], (unsigned)g_forearm_hl04_can_bus_debug.raw_frame[4],
+          (unsigned)g_forearm_hl04_can_bus_debug.raw_frame[5], (unsigned)g_forearm_hl04_can_bus_debug.raw_frame[6],
+          (unsigned)g_forearm_hl04_can_bus_debug.raw_frame[7]);
     LOG_I("target p=[%.3f %.3f %.3f] q=[%.3f %.3f %.3f %.3f %.3f %.3f]", state.target_position_m[0], state.target_position_m[1],
           state.target_position_m[2], state.legacy_joint_target_rad[0], state.legacy_joint_target_rad[1], state.legacy_joint_target_rad[2],
           state.legacy_joint_target_rad[3], state.legacy_joint_target_rad[4], state.legacy_joint_target_rad[5]);
