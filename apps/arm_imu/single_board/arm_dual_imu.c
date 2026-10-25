@@ -502,34 +502,37 @@ static void arm_hl04_can_decode(Arm_Dual_Imu_Context_t *context, uint32_t can_id
 
 static uint8_t arm_hl04_can_init(void)
 {
-    const uint32_t    extended_id = ARM_DUAL_IMU_CAN_RX_ID;
-    CAN_FilterTypeDef filter      = {
-             .FilterMode           = CAN_FILTERMODE_IDMASK,
-             .FilterScale          = CAN_FILTERSCALE_32BIT,
-             .FilterFIFOAssignment = CAN_FILTER_FIFO0,
-             .FilterBank           = ARM_DUAL_IMU_CAN_FILTER_BANK,
-             .SlaveStartFilterBank = ARM_DUAL_IMU_CAN_FILTER_BANK,
-             .FilterIdHigh         = (uint16_t)(extended_id >> 13U),
-             .FilterIdLow          = (uint16_t)((extended_id << 3U) | CAN_ID_EXT),
-             .FilterMaskIdHigh     = 0xFFFFU,
-             .FilterMaskIdLow      = 0xFFFCU,
-             .FilterActivation     = CAN_FILTER_ENABLE,
+    CAN_HandleTypeDef *const can         = BSP_CAN_HANDLE2;
+    const uint32_t           extended_id = ARM_DUAL_IMU_CAN_RX_ID;
+    CAN_FilterTypeDef        filter      = {
+                    .FilterMode           = CAN_FILTERMODE_IDMASK,
+                    .FilterScale          = CAN_FILTERSCALE_32BIT,
+                    .FilterFIFOAssignment = CAN_FILTER_FIFO0,
+                    .FilterBank           = ARM_DUAL_IMU_CAN_FILTER_BANK,
+                    .SlaveStartFilterBank = ARM_DUAL_IMU_CAN_FILTER_BANK,
+                    .FilterIdHigh         = (uint16_t)(extended_id >> 13U),
+                    .FilterIdLow          = (uint16_t)((extended_id << 3U) | CAN_ID_EXT),
+                    .FilterMaskIdHigh     = 0xFFFFU,
+                    .FilterMaskIdLow      = 0xFFFCU,
+                    .FilterActivation     = CAN_FILTER_ENABLE,
     };
 
-    BSP_CAN_HANDLE2->Init.Prescaler = ARM_DUAL_IMU_CAN_PRESCALER;
-    if (HAL_CAN_Init(BSP_CAN_HANDLE2) != HAL_OK) return 0U;
-    if (HAL_CAN_ConfigFilter(BSP_CAN_HANDLE2, &filter) != HAL_OK) return 0U;
-    if (HAL_CAN_Start(BSP_CAN_HANDLE2) != HAL_OK) return 0U;
+    can->Init.Prescaler = ARM_DUAL_IMU_CAN_PRESCALER;
+    if (HAL_CAN_Init(can) != HAL_OK) return 0U;
+    if (HAL_CAN_ConfigFilter(can, &filter) != HAL_OK) return 0U;
+    if (HAL_CAN_Start(can) != HAL_OK) return 0U;
     return 1U;
 }
 
 static void arm_hl04_can_poll(Arm_Dual_Imu_Context_t *context)
 {
-    while (HAL_CAN_GetRxFifoFillLevel(BSP_CAN_HANDLE2, CAN_RX_FIFO0) > 0U)
+    CAN_HandleTypeDef *const can = BSP_CAN_HANDLE2;
+
+    while (HAL_CAN_GetRxFifoFillLevel(can, CAN_RX_FIFO0) > 0U)
     {
         CAN_RxHeaderTypeDef rx_header;
         uint8_t             rx_data[ARM_HL04_CAN_RAW_FRAME_SIZE];
-        if (HAL_CAN_GetRxMessage(BSP_CAN_HANDLE2, CAN_RX_FIFO0, &rx_header, rx_data) != HAL_OK)
+        if (HAL_CAN_GetRxMessage(can, CAN_RX_FIFO0, &rx_header, rx_data) != HAL_OK)
         {
             context->forearm_frame_error_count++;
             continue;
