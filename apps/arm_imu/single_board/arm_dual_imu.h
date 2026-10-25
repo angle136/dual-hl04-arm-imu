@@ -55,23 +55,6 @@ typedef struct
     float    quaternion[4];
 } Arm_Hl04_Can_Data_t;
 
-/** CAN2 总线最近一帧与协议统计，供 Ozone 判断 HL04 实际输出模式。 */
-typedef struct
-{
-    uint32_t sequence;
-    uint32_t last_rx_tick;
-    uint32_t total_frame_count;
-    uint32_t standard_frame_count;
-    uint32_t extended_frame_count;
-    uint32_t ignored_frame_count;
-    uint32_t can_id;
-    uint8_t  dlc;
-    uint8_t  is_extended;
-    uint8_t  is_remote;
-    uint8_t  reserved;
-    uint8_t  raw_frame[ARM_HL04_CAN_RAW_FRAME_SIZE];
-} Arm_Hl04_Can_Bus_Debug_t;
-
 /**
  * @brief 双 IMU 人体手臂映射结果。
  *
@@ -116,9 +99,6 @@ extern volatile Arm_Hl04_Uart_Raw_Frame_t g_upper_hl04_uart_raw_frame;
 
 /** Ozone 观察变量：前臂 CAN2 HL04 原始数据。 */
 extern volatile Arm_Hl04_Can_Data_t g_forearm_hl04_can_data;
-
-/** Ozone 观察变量：CAN2 收到的任意最新帧及协议统计。 */
-extern volatile Arm_Hl04_Can_Bus_Debug_t g_forearm_hl04_can_bus_debug;
 
 /** 初始化大臂 HL04 串口、前臂 HL04 CAN2 接收、解算状态和线程。 */
 void arm_dual_imu_init(void);

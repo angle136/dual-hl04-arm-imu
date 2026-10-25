@@ -28,7 +28,6 @@
 #define ARM_DUAL_IMU_UART_BUFFER_SIZE    256U
 #define ARM_DUAL_IMU_READ_BUFFER_SIZE    128U
 #define ARM_DUAL_IMU_CAN_FILTER_BANK     14U
-#define ARM_DUAL_IMU_CANOPEN_RX_ID       0x488U
 #define ARM_DUAL_IMU_QUAT_NORM_MIN_SQ    0.25f
 #define ARM_DUAL_IMU_QUAT_NORM_MAX_SQ    2.25f
 #define ARM_DUAL_IMU_SINGULAR_EPSILON    1.0e-4f
@@ -79,7 +78,6 @@ volatile Arm_Dual_Imu_State_t      g_arm_dual_imu_state;
 volatile Arm_Hl04_Uart_Data_t      g_upper_hl04_uart_data;
 volatile Arm_Hl04_Uart_Raw_Frame_t g_upper_hl04_uart_raw_frame;
 volatile Arm_Hl04_Can_Data_t       g_forearm_hl04_can_data;
-volatile Arm_Hl04_Can_Bus_Debug_t  g_forearm_hl04_can_bus_debug;
 
 static float arm_dual_imu_clampf(float value, float minimum, float maximum)
 {
@@ -318,34 +316,6 @@ static void arm_hl04_can_publish(const Arm_Hl04_Can_Data_t *data)
     g_forearm_hl04_can_data.sequence = odd_sequence + 1U;
 }
 
-static void arm_hl04_can_bus_debug_publish(const CAN_RxHeaderTypeDef *header, const uint8_t *bytes, uint8_t ignored)
-{
-    uint32_t odd_sequence = (g_forearm_hl04_can_bus_debug.sequence + 1U) | 1U;
-
-    g_forearm_hl04_can_bus_debug.sequence = odd_sequence;
-    __DMB();
-    g_forearm_hl04_can_bus_debug.last_rx_tick = tx_time_get();
-    g_forearm_hl04_can_bus_debug.total_frame_count++;
-    g_forearm_hl04_can_bus_debug.can_id      = header->IDE == CAN_ID_EXT ? header->ExtId : header->StdId;
-    g_forearm_hl04_can_bus_debug.dlc         = (uint8_t)header->DLC;
-    g_forearm_hl04_can_bus_debug.is_extended = header->IDE == CAN_ID_EXT ? 1U : 0U;
-    g_forearm_hl04_can_bus_debug.is_remote   = header->RTR == CAN_RTR_REMOTE ? 1U : 0U;
-    if (header->IDE == CAN_ID_EXT)
-        g_forearm_hl04_can_bus_debug.extended_frame_count++;
-    else
-        g_forearm_hl04_can_bus_debug.standard_frame_count++;
-    if (ignored != 0U) g_forearm_hl04_can_bus_debug.ignored_frame_count++;
-
-    uint8_t copy_length = header->DLC > ARM_HL04_CAN_RAW_FRAME_SIZE ? ARM_HL04_CAN_RAW_FRAME_SIZE : (uint8_t)header->DLC;
-    memcpy((void *)g_forearm_hl04_can_bus_debug.raw_frame, bytes, copy_length);
-    if (copy_length < ARM_HL04_CAN_RAW_FRAME_SIZE)
-    {
-        memset((void *)&g_forearm_hl04_can_bus_debug.raw_frame[copy_length], 0, ARM_HL04_CAN_RAW_FRAME_SIZE - copy_length);
-    }
-    __DMB();
-    g_forearm_hl04_can_bus_debug.sequence = odd_sequence + 1U;
-}
-
 static uint8_t arm_hl04_uart_snapshot(Arm_Hl04_Uart_Data_t *data)
 {
     for (uint8_t attempt = 0U; attempt < 4U; ++attempt)
@@ -539,10 +509,10 @@ static uint8_t arm_hl04_can_init(void)
                .FilterFIFOAssignment = CAN_FILTER_FIFO0,
                .FilterBank           = ARM_DUAL_IMU_CAN_FILTER_BANK,
                .SlaveStartFilterBank = ARM_DUAL_IMU_CAN_FILTER_BANK,
-               .FilterIdHigh         = 0U,
+               .FilterIdHigh         = (uint16_t)(((uint32_t)ARM_DUAL_IMU_CAN_RX_ID & 0x7FFU) << 5U),
                .FilterIdLow          = 0U,
-               .FilterMaskIdHigh     = 0U,
-               .FilterMaskIdLow      = 0U,
+               .FilterMaskIdHigh     = 0xFFE0U,
+               .FilterMaskIdLow      = 0x0006U,
                .FilterActivation     = CAN_FILTER_ENABLE,
     };
 
@@ -567,22 +537,14 @@ static void arm_hl04_can_poll(Arm_Dual_Imu_Context_t *context)
             continue;
         }
 
-        uint8_t is_j1939_quaternion =
-            (rx_header.IDE == CAN_ID_EXT && rx_header.ExtId == ARM_DUAL_IMU_CAN_RX_ID && rx_header.RTR == CAN_RTR_DATA) ? 1U : 0U;
-        uint8_t is_canopen_quaternion =
-            (rx_header.IDE == CAN_ID_STD && rx_header.StdId == ARM_DUAL_IMU_CANOPEN_RX_ID && rx_header.RTR == CAN_RTR_DATA) ? 1U : 0U;
-        uint8_t ignored = (is_j1939_quaternion == 0U && is_canopen_quaternion == 0U) ? 1U : 0U;
-        arm_hl04_can_bus_debug_publish(&rx_header, rx_data, ignored);
-
-        if (ignored != 0U) continue;
-        if (rx_header.DLC != ARM_HL04_CAN_RAW_FRAME_SIZE)
+        if (rx_header.IDE != CAN_ID_STD || rx_header.StdId != ARM_DUAL_IMU_CAN_RX_ID || rx_header.RTR != CAN_RTR_DATA ||
+            rx_header.DLC != ARM_HL04_CAN_RAW_FRAME_SIZE)
         {
             context->forearm_frame_error_count++;
             continue;
         }
 
-        uint32_t can_id = rx_header.IDE == CAN_ID_EXT ? rx_header.ExtId : rx_header.StdId;
-        arm_hl04_can_decode(context, can_id, rx_data, (uint8_t)rx_header.DLC);
+        arm_hl04_can_decode(context, rx_header.StdId, rx_data, (uint8_t)rx_header.DLC);
     }
 }
 
@@ -722,7 +684,6 @@ void arm_dual_imu_init(void)
     memset((void *)&g_upper_hl04_uart_data, 0, sizeof(g_upper_hl04_uart_data));
     memset((void *)&g_upper_hl04_uart_raw_frame, 0, sizeof(g_upper_hl04_uart_raw_frame));
     memset((void *)&g_forearm_hl04_can_data, 0, sizeof(g_forearm_hl04_can_data));
-    memset((void *)&g_forearm_hl04_can_bus_debug, 0, sizeof(g_forearm_hl04_can_bus_debug));
     arm_hl04_parser_reset(&g_arm_dual_imu_context.parser);
     arm_dual_imu_matrix_identity(g_arm_dual_imu_context.upper_zero_transpose);
     arm_dual_imu_matrix_identity(g_arm_dual_imu_context.forearm_zero_transpose);
@@ -763,9 +724,8 @@ void arm_dual_imu_init(void)
         return;
     }
 
-    LOG_I("dual HL04 initialized: upper UART baud=%lu, forearm CAN2 500k J1939=0x%08lX/CANopen=0x%03X, auto zero=%u",
-          (unsigned long)ARM_DUAL_IMU_UART_BAUD, (unsigned long)ARM_DUAL_IMU_CAN_RX_ID, ARM_DUAL_IMU_CANOPEN_RX_ID,
-          (unsigned)ARM_DUAL_IMU_AUTO_ZERO_ENABLE);
+    LOG_I("dual HL04 initialized: upper UART baud=%lu, forearm CAN2 500k CANopen id=0x%03X, auto zero=%u", (unsigned long)ARM_DUAL_IMU_UART_BAUD,
+          (unsigned)ARM_DUAL_IMU_CAN_RX_ID, (unsigned)ARM_DUAL_IMU_AUTO_ZERO_ENABLE);
 }
 
 void arm_dual_imu_request_zero(void) { g_arm_dual_imu_context.zero_requested = 1U; }

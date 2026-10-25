@@ -9,8 +9,8 @@ set(MODULES_CHASSIS "")
 set(ARM_DUAL_IMU_ENABLE             1)
 set(ARM_DUAL_IMU_UART               huart1)
 set(ARM_DUAL_IMU_UART_BAUD          921600)
-# HL04 出厂默认：J1939、500 kbit/s、节点 0x08、四元数 PGN 0xFF46。
-set(ARM_DUAL_IMU_CAN_RX_ID          0x0CFF4608)
+# 当前 HL04 实测配置：CANopen、500 kbit/s、节点 8、TPDO4 四元数标准帧。
+set(ARM_DUAL_IMU_CAN_RX_ID          0x488)
 set(ARM_DUAL_IMU_CAN_PRESCALER      6)
 set(ARM_DUAL_IMU_TASK_STACK_SIZE    2048)
 set(ARM_DUAL_IMU_TASK_PRIORITY      11)
