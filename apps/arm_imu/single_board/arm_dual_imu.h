@@ -72,6 +72,7 @@ typedef struct
     uint8_t  pose_valid;
     uint8_t  ik_valid;
     uint8_t  reserved[2];
+    uint32_t zero_count;
     uint32_t upper_last_rx_tick;
     uint32_t upper_packet_count;
     uint32_t upper_frame_error_count;

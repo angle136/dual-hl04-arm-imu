@@ -4,13 +4,13 @@
 
 # 目标机器人 & 板型
 set(ROBOT "arm_imu" CACHE STRING "Target robot")
-set_property(CACHE ROBOT PROPERTY STRINGS arm arm_imu)
+set_property(CACHE ROBOT PROPERTY STRINGS arm_imu)
 set(BOARD "single" CACHE STRING "Board role")
-set_property(CACHE BOARD PROPERTY STRINGS single gimbal chassis)
+set_property(CACHE BOARD PROPERTY STRINGS single)
 
 # 板型校验
-if(NOT BOARD MATCHES "^(single|gimbal|chassis)$")
-    message(FATAL_ERROR "Unknown BOARD '${BOARD}', expected: single / gimbal / chassis")
+if(NOT BOARD STREQUAL "single")
+    message(FATAL_ERROR "Unknown BOARD '${BOARD}', expected: single")
 endif()
 
 # 加载默认模块配置
@@ -36,6 +36,9 @@ set(ARM_DUAL_IMU_FOREARM_TIMEOUT_MS 100)
 set(ARM_DUAL_IMU_AUTO_ZERO_ENABLE   0)
 set(ARM_DUAL_IMU_AUTO_ZERO_DELAY_MS 1000)
 set(ARM_IMU_DEBUG_ENABLE            0)
+set(ARM_IMU_DEBUG_RTT_ENABLE        0)
+set(ARM_IMU_DEBUG_RTT_CHANNEL       1)
+set(ARM_IMU_DEBUG_RTT_BUFFER_SIZE   4096)
 
 # 加载机器人差异配置
 include(${CMAKE_CURRENT_LIST_DIR}/${ROBOT}/robot.cmake)

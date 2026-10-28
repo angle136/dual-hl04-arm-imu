@@ -64,6 +64,7 @@ typedef struct
     uint32_t             both_ready_since_tick;
     volatile uint32_t    forearm_packet_count;
     volatile uint32_t    forearm_frame_error_count;
+    uint32_t             zero_count;
     uint8_t              have_previous_joint_target;
     uint8_t              calibrated;
     volatile uint8_t     zero_requested;
@@ -79,6 +80,14 @@ volatile Arm_Hl04_Uart_Data_t      g_upper_hl04_uart_data;
 volatile Arm_Hl04_Uart_Raw_Frame_t g_upper_hl04_uart_raw_frame;
 volatile Arm_Hl04_Can_Data_t       g_forearm_hl04_can_data;
 
+/**
+ * @brief 将浮点数限制在指定闭区间内。
+ * @param value 输入值。
+ * @param minimum 区间下限。
+ * @param maximum 区间上限。
+ * @return 限幅后的浮点数。
+ * @note 调用关系：由解析逆解计算余弦值时调用，避免浮点误差导致 acosf() 域错误。
+ */
 static float arm_dual_imu_clampf(float value, float minimum, float maximum)
 {
     if (value < minimum) return minimum;
@@ -86,6 +95,12 @@ static float arm_dual_imu_clampf(float value, float minimum, float maximum)
     return value;
 }
 
+/**
+ * @brief 生成三阶单位旋转矩阵。
+ * @param matrix 输出 3x3 单位矩阵。
+ * @retval 无。
+ * @note 调用关系：由初始化函数及单轴旋转矩阵构造函数调用。
+ */
 static void arm_dual_imu_matrix_identity(float matrix[3][3])
 {
     memset(matrix, 0, sizeof(float) * 9U);
@@ -94,6 +109,13 @@ static void arm_dual_imu_matrix_identity(float matrix[3][3])
     matrix[2][2] = 1.0f;
 }
 
+/**
+ * @brief 计算三阶矩阵的转置。
+ * @param input 输入 3x3 矩阵。
+ * @param output 输出转置后的 3x3 矩阵；不得与 input 重叠。
+ * @retval 无。
+ * @note 调用关系：由零位捕获和腕部相对旋转分解调用。
+ */
 static void arm_dual_imu_matrix_transpose(const float input[3][3], float output[3][3])
 {
     for (uint8_t row = 0U; row < 3U; ++row)
@@ -102,6 +124,14 @@ static void arm_dual_imu_matrix_transpose(const float input[3][3], float output[
     }
 }
 
+/**
+ * @brief 计算两个三阶矩阵的乘积。
+ * @param left 左乘 3x3 矩阵。
+ * @param right 右乘 3x3 矩阵。
+ * @param output 输出乘积矩阵，允许与输入矩阵重叠。
+ * @retval 无。
+ * @note 调用关系：由相对姿态解算、末端坐标变换和解析逆解调用。
+ */
 static void arm_dual_imu_matrix_multiply(const float left[3][3], const float right[3][3], float output[3][3])
 {
     float result[3][3] = {0};
@@ -115,6 +145,14 @@ static void arm_dual_imu_matrix_multiply(const float left[3][3], const float rig
     memcpy(output, result, sizeof(result));
 }
 
+/**
+ * @brief 用三阶旋转矩阵变换三维向量。
+ * @param matrix 输入 3x3 旋转矩阵。
+ * @param vector 输入三维向量。
+ * @param output 输出变换后的三维向量，允许与 vector 重叠。
+ * @retval 无。
+ * @note 调用关系：由双 IMU 位姿解算将本地连杆向量转换到基坐标系。
+ */
 static void arm_dual_imu_matrix_vector(const float matrix[3][3], const float vector[3], float output[3])
 {
     float result[3];
@@ -125,6 +163,13 @@ static void arm_dual_imu_matrix_vector(const float matrix[3][3], const float vec
     memcpy(output, result, sizeof(result));
 }
 
+/**
+ * @brief 校验并归一化四元数。
+ * @param input 输入四元数，顺序为 w、x、y、z。
+ * @param output 输出单位四元数，允许与 input 重叠。
+ * @return 1 表示输入有限且模长有效，0 表示参数或数据无效。
+ * @note 调用关系：由 UART/CAN 解码和周期位姿计算调用，作为传感器数据有效性门槛。
+ */
 static uint8_t arm_dual_imu_normalize_quaternion(const float input[4], float output[4])
 {
     if (input == NULL || output == NULL) return 0U;
@@ -143,6 +188,13 @@ static uint8_t arm_dual_imu_normalize_quaternion(const float input[4], float out
     return 1U;
 }
 
+/**
+ * @brief 将单位四元数转换为三阶旋转矩阵。
+ * @param quaternion 输入单位四元数，顺序为 w、x、y、z。
+ * @param rotation 输出 3x3 旋转矩阵。
+ * @retval 无。
+ * @note 调用关系：由 arm_dual_imu_calculate() 在两路 IMU 数据有效时调用。
+ */
 static void arm_dual_imu_quaternion_to_rotation(const float quaternion[4], float rotation[3][3])
 {
     const float w = quaternion[0];
@@ -161,6 +213,13 @@ static void arm_dual_imu_quaternion_to_rotation(const float quaternion[4], float
     rotation[2][2] = 1.0f - 2.0f * (x * x + y * y);
 }
 
+/**
+ * @brief 构造绕 Z 轴旋转的三阶矩阵。
+ * @param angle 输入旋转角，单位 rad。
+ * @param rotation 输出 3x3 旋转矩阵。
+ * @retval 无。
+ * @note 调用关系：由解析逆解构造前三个关节的正向旋转链。
+ */
 static void arm_dual_imu_rotation_z(float angle, float rotation[3][3])
 {
     float cosine = cosf(angle);
@@ -172,6 +231,13 @@ static void arm_dual_imu_rotation_z(float angle, float rotation[3][3])
     rotation[1][1] = cosine;
 }
 
+/**
+ * @brief 构造绕 Y 轴旋转的三阶矩阵。
+ * @param angle 输入旋转角，单位 rad。
+ * @param rotation 输出 3x3 旋转矩阵。
+ * @retval 无。
+ * @note 调用关系：由解析逆解构造肩部和肘部旋转矩阵。
+ */
 static void arm_dual_imu_rotation_y(float angle, float rotation[3][3])
 {
     float cosine = cosf(angle);
@@ -183,6 +249,13 @@ static void arm_dual_imu_rotation_y(float angle, float rotation[3][3])
     rotation[2][2] = cosine;
 }
 
+/**
+ * @brief 将角度展开到最靠近参考角的 2pi 等价分支。
+ * @param angle 输入待展开角度，单位 rad。
+ * @param reference 输入上一周期参考角度，单位 rad。
+ * @return 与参考角差值不超过 pi 的等价角度，单位 rad。
+ * @note 调用关系：由解析逆解逐轴调用，用于抑制跨越正负 pi 时的目标跳变。
+ */
 static float arm_dual_imu_unwrap_near(float angle, float reference)
 {
     while ((angle - reference) > ARM_DUAL_IMU_PI) angle -= ARM_DUAL_IMU_TWO_PI;
@@ -190,6 +263,15 @@ static float arm_dual_imu_unwrap_near(float angle, float reference)
     return angle;
 }
 
+/**
+ * @brief 使用 YUAN 版几何模型求解六自由度机械臂关节目标。
+ * @param context 输入输出双 IMU 上下文，用于保存上一周期关节解。
+ * @param position 输入末端目标位置，单位 m。
+ * @param target_rotation 输入末端目标旋转矩阵。
+ * @param joint_target 输出 J1~J6 解析逆解角，单位 rad。
+ * @return 1 表示目标可达且求解结果有效，0 表示奇异、越界或结果非有限值。
+ * @note 调用关系：仅由 arm_dual_imu_calculate() 在标定位姿有效后调用；当前结果只用于观测和遥测，不驱动电机。
+ */
 static uint8_t arm_dual_imu_solve_legacy_ik(Arm_Dual_Imu_Context_t *context, const float position[3], const float target_rotation[3][3],
                                             float joint_target[ARM_DUAL_IMU_IK_DOF])
 {
@@ -261,6 +343,12 @@ static uint8_t arm_dual_imu_solve_legacy_ik(Arm_Dual_Imu_Context_t *context, con
     return 1U;
 }
 
+/**
+ * @brief 从 HL04 小端字节流读取一个 float。
+ * @param bytes 输入至少 4 字节的缓冲区地址。
+ * @return 按本机 float 表示解释得到的数值。
+ * @note 调用关系：由 UART 完整帧解码函数读取压力、惯性数据、欧拉角和四元数。
+ */
 static float arm_hl04_read_float(const uint8_t *bytes)
 {
     float value;
@@ -268,6 +356,12 @@ static float arm_hl04_read_float(const uint8_t *bytes)
     return value;
 }
 
+/**
+ * @brief 从 HL04 小端字节流读取一个 32 位无符号整数。
+ * @param bytes 输入至少 4 字节的缓冲区地址。
+ * @return 解码后的 uint32_t 数值。
+ * @note 调用关系：由 UART 完整帧解码函数读取传感器时间戳。
+ */
 static uint32_t arm_hl04_read_u32(const uint8_t *bytes)
 {
     uint32_t value;
@@ -275,6 +369,12 @@ static uint32_t arm_hl04_read_u32(const uint8_t *bytes)
     return value;
 }
 
+/**
+ * @brief 以序列锁方式发布最近一个大臂 HL04 UART 原始帧。
+ * @param parser 输入已收齐完整帧的解析器状态。
+ * @retval 无。
+ * @note 调用关系：由 arm_hl04_decode_frame() 在字段校验前调用，供 Ozone 保留原始诊断数据。
+ */
 static void arm_hl04_uart_raw_frame_publish(const Arm_Hl04_Parser_t *parser)
 {
     uint32_t odd_sequence = (g_upper_hl04_uart_raw_frame.sequence + 1U) | 1U;
@@ -294,6 +394,12 @@ static void arm_hl04_uart_raw_frame_publish(const Arm_Hl04_Parser_t *parser)
     g_upper_hl04_uart_raw_frame.sequence = odd_sequence + 1U;
 }
 
+/**
+ * @brief 以序列锁方式发布大臂 HL04 UART 解码结果。
+ * @param data 输入一帧已校验的 UART 解码数据。
+ * @retval 无。
+ * @note 调用关系：由双 IMU 工作线程在流解析器返回完整有效帧后调用。
+ */
 static void arm_hl04_uart_publish(const Arm_Hl04_Uart_Data_t *data)
 {
     const size_t payload_offset     = offsetof(Arm_Hl04_Uart_Data_t, last_rx_tick);
@@ -305,6 +411,12 @@ static void arm_hl04_uart_publish(const Arm_Hl04_Uart_Data_t *data)
     g_upper_hl04_uart_data.sequence = odd_sequence + 1U;
 }
 
+/**
+ * @brief 以序列锁方式发布前臂 HL04 CAN 解码结果。
+ * @param data 输入当前 CAN 帧的解码数据；无效帧也会携带错误计数发布。
+ * @retval 无。
+ * @note 调用关系：由 arm_hl04_can_decode() 在成功和错误路径调用。
+ */
 static void arm_hl04_can_publish(const Arm_Hl04_Can_Data_t *data)
 {
     const size_t payload_offset      = offsetof(Arm_Hl04_Can_Data_t, last_rx_tick);
@@ -316,6 +428,12 @@ static void arm_hl04_can_publish(const Arm_Hl04_Can_Data_t *data)
     g_forearm_hl04_can_data.sequence = odd_sequence + 1U;
 }
 
+/**
+ * @brief 获取一致的大臂 HL04 UART 数据快照。
+ * @param data 输出快照。
+ * @return 1 表示序列锁读取成功，0 表示四次尝试期间持续发生并发写入。
+ * @note 调用关系：由 arm_dual_imu_calculate() 每周期读取最新大臂数据。
+ */
 static uint8_t arm_hl04_uart_snapshot(Arm_Hl04_Uart_Data_t *data)
 {
     for (uint8_t attempt = 0U; attempt < 4U; ++attempt)
@@ -330,6 +448,12 @@ static uint8_t arm_hl04_uart_snapshot(Arm_Hl04_Uart_Data_t *data)
     return 0U;
 }
 
+/**
+ * @brief 获取一致的前臂 HL04 CAN 数据快照。
+ * @param data 输出快照。
+ * @return 1 表示序列锁读取成功，0 表示四次尝试期间持续发生并发写入。
+ * @note 调用关系：由 arm_dual_imu_calculate() 每周期读取最新前臂数据。
+ */
 static uint8_t arm_hl04_can_snapshot(Arm_Hl04_Can_Data_t *data)
 {
     for (uint8_t attempt = 0U; attempt < 4U; ++attempt)
@@ -344,6 +468,13 @@ static uint8_t arm_hl04_can_snapshot(Arm_Hl04_Can_Data_t *data)
     return 0U;
 }
 
+/**
+ * @brief 解码并校验一个完整的大臂 HL04 UART 帧。
+ * @param parser 输入解析器及完整原始帧，同时更新包计数和错误计数。
+ * @param data 输出解码后的传感器数据。
+ * @return 1 表示标签和四元数有效，0 表示帧内容无效。
+ * @note 调用关系：由 arm_hl04_parser_feed() 收齐 expected_length 字节后调用。
+ */
 static uint8_t arm_hl04_decode_frame(Arm_Hl04_Parser_t *parser, Arm_Hl04_Uart_Data_t *data)
 {
     arm_hl04_uart_raw_frame_publish(parser);
@@ -384,6 +515,12 @@ static uint8_t arm_hl04_decode_frame(Arm_Hl04_Parser_t *parser, Arm_Hl04_Uart_Da
     return 1U;
 }
 
+/**
+ * @brief 将 HL04 UART 流解析器恢复到等待首字节状态。
+ * @param parser 输入输出解析器。
+ * @retval 无。
+ * @note 调用关系：由初始化、异常状态处理以及每个完整帧处理结束后调用；累计计数不会被清零。
+ */
 static void arm_hl04_parser_reset(Arm_Hl04_Parser_t *parser)
 {
     parser->state           = HL04_WAIT_HEADER_0;
@@ -392,6 +529,14 @@ static void arm_hl04_parser_reset(Arm_Hl04_Parser_t *parser)
     parser->expected_length = 0U;
 }
 
+/**
+ * @brief 向 HL04 UART 状态机逐字节输入数据。
+ * @param parser 输入输出流解析器。
+ * @param byte 输入当前字节。
+ * @param data 输出完整有效帧的解码结果。
+ * @return 1 表示本字节结束了一个有效完整帧，0 表示仍在组帧或帧无效。
+ * @note 调用关系：由双 IMU 工作线程遍历 BSP_UART_Read() 返回的字节块时调用。
+ */
 static uint8_t arm_hl04_parser_feed(Arm_Hl04_Parser_t *parser, uint8_t byte, Arm_Hl04_Uart_Data_t *data)
 {
     switch (parser->state)
@@ -458,6 +603,15 @@ static uint8_t arm_hl04_parser_feed(Arm_Hl04_Parser_t *parser, uint8_t byte, Arm
     return 0U;
 }
 
+/**
+ * @brief 解码并发布一个前臂 HL04 CAN 四元数帧。
+ * @param context 输入输出双 IMU 上下文，用于累计前臂包数和错误数。
+ * @param can_id 输入接收帧标准标识符。
+ * @param bytes 输入 CAN 数据区。
+ * @param length 输入数据长度，单位字节。
+ * @retval 无。
+ * @note 调用关系：由 arm_hl04_can_poll() 对通过标识符筛选的帧调用。
+ */
 static void arm_hl04_can_decode(Arm_Dual_Imu_Context_t *context, uint32_t can_id, const uint8_t *bytes, uint8_t length)
 {
     if (context == NULL || bytes == NULL) return;
@@ -500,6 +654,12 @@ static void arm_hl04_can_decode(Arm_Dual_Imu_Context_t *context, uint32_t can_id
     arm_hl04_can_publish(&data);
 }
 
+/**
+ * @brief 初始化前臂 HL04 所用 CAN2 和精确接收滤波器。
+ * @param 无。
+ * @return 1 表示 CAN 初始化、滤波器配置和启动全部成功，0 表示任一步骤失败。
+ * @note 调用关系：仅由 arm_dual_imu_init() 在线程创建前调用。
+ */
 static uint8_t arm_hl04_can_init(void)
 {
     CAN_HandleTypeDef *const can    = BSP_CAN_HANDLE2;
@@ -523,6 +683,12 @@ static uint8_t arm_hl04_can_init(void)
     return 1U;
 }
 
+/**
+ * @brief 轮询并清空 CAN2 FIFO0 中待处理的前臂 HL04 帧。
+ * @param context 输入输出双 IMU 上下文，用于解码和累计错误计数。
+ * @retval 无。
+ * @note 调用关系：由双 IMU 工作线程每轮在 UART 处理后调用；非法帧只累计错误，不进入姿态解算。
+ */
 static void arm_hl04_can_poll(Arm_Dual_Imu_Context_t *context)
 {
     CAN_HandleTypeDef *const can = BSP_CAN_HANDLE2;
@@ -548,6 +714,12 @@ static void arm_hl04_can_poll(Arm_Dual_Imu_Context_t *context)
     }
 }
 
+/**
+ * @brief 以序列锁方式发布完整双 IMU 解算状态。
+ * @param state 输入待发布状态。
+ * @retval 无。
+ * @note 调用关系：由 arm_dual_imu_calculate() 的提前退出路径和正常解算末尾调用。
+ */
 static void arm_dual_imu_publish(const Arm_Dual_Imu_State_t *state)
 {
     const size_t payload_offset   = offsetof(Arm_Dual_Imu_State_t, initialized);
@@ -559,16 +731,31 @@ static void arm_dual_imu_publish(const Arm_Dual_Imu_State_t *state)
     g_arm_dual_imu_state.sequence = odd_sequence + 1U;
 }
 
+/**
+ * @brief 将当前两路 IMU 姿态捕获为中立零位。
+ * @param context 输入输出双 IMU 上下文，保存两路零位转置矩阵和校准状态。
+ * @param upper_raw 输入大臂 IMU 当前原始旋转矩阵。
+ * @param forearm_raw 输入前臂 IMU 当前原始旋转矩阵。
+ * @retval 无。
+ * @note 调用关系：由 arm_dual_imu_calculate() 在两路数据均有效且收到自动或手动置零请求时调用。
+ */
 static void arm_dual_imu_capture_zero(Arm_Dual_Imu_Context_t *context, const float upper_raw[3][3], const float forearm_raw[3][3])
 {
     arm_dual_imu_matrix_transpose(upper_raw, context->upper_zero_transpose);
     arm_dual_imu_matrix_transpose(forearm_raw, context->forearm_zero_transpose);
-    context->calibrated                 = 1U;
-    context->zero_requested             = 0U;
+    context->calibrated     = 1U;
+    context->zero_requested = 0U;
+    context->zero_count++;
     context->have_previous_joint_target = 0U;
-    LOG_I("dual IMU neutral pose captured");
+    LOG_I("dual IMU neutral pose captured, count=%lu", (unsigned long)context->zero_count);
 }
 
+/**
+ * @brief 从两路最新 IMU 数据计算相对姿态、末端位姿和六轴解析逆解。
+ * @param context 输入输出双 IMU 上下文，保存校准信息、连续角状态和发布状态。
+ * @retval 无。
+ * @note 调用关系：由双 IMU 工作线程每轮调用；数据超时或未校准时仅发布有效性状态，不执行位姿和逆解。
+ */
 static void arm_dual_imu_calculate(Arm_Dual_Imu_Context_t *context)
 {
     Arm_Dual_Imu_State_t *state = &context->state;
@@ -619,6 +806,7 @@ static void arm_dual_imu_calculate(Arm_Dual_Imu_Context_t *context)
     }
 
     state->calibrated = context->calibrated;
+    state->zero_count = context->zero_count;
     state->pose_valid = 0U;
     state->ik_valid   = 0U;
     if (state->upper_imu_valid == 0U || state->forearm_imu_valid == 0U || context->calibrated == 0U)
@@ -652,6 +840,12 @@ static void arm_dual_imu_calculate(Arm_Dual_Imu_Context_t *context)
     arm_dual_imu_publish(state);
 }
 
+/**
+ * @brief 双 IMU 主工作线程入口。
+ * @param thread_input ThreadX 线程入口参数，当前未使用。
+ * @retval 无，线程启动后持续运行。
+ * @note 调用关系：由 arm_dual_imu_init() 创建；循环执行 UART 取数与组帧、CAN 轮询及位姿解算。
+ */
 static void arm_dual_imu_task_entry(ULONG thread_input)
 {
     (void)thread_input;
@@ -677,6 +871,12 @@ static void arm_dual_imu_task_entry(ULONG thread_input)
     }
 }
 
+/**
+ * @brief 初始化双 HL04 接口、共享状态和解算线程。
+ * @param 无。
+ * @retval 无。
+ * @note 调用关系：由 robot_control_init() 调用；依次初始化 USART1 DMA 接收、CAN2 接收和 ThreadX 工作线程，任一步失败即停止后续初始化。
+ */
 void arm_dual_imu_init(void)
 {
     memset(&g_arm_dual_imu_context, 0, sizeof(g_arm_dual_imu_context));
@@ -728,8 +928,20 @@ void arm_dual_imu_init(void)
           (unsigned)ARM_DUAL_IMU_CAN_RX_ID, (unsigned)ARM_DUAL_IMU_AUTO_ZERO_ENABLE);
 }
 
+/**
+ * @brief 请求在下一次两路 IMU 均有效时捕获当前姿态为中立零位。
+ * @param 无。
+ * @retval 无。
+ * @note 调用关系：由按键回调或其他 APP 调用；这里只置请求标志，实际矩阵更新在双 IMU 工作线程中完成。
+ */
 void arm_dual_imu_request_zero(void) { g_arm_dual_imu_context.zero_requested = 1U; }
 
+/**
+ * @brief 获取一致的双 IMU 解算状态快照。
+ * @param state 输出状态缓冲区。
+ * @return 1 表示序列锁读取成功，0 表示参数无效或八次尝试期间持续发生并发写入。
+ * @note 调用关系：主要由调试线程及后续业务消费者调用；函数只读共享状态，不触发传感器采集或重新计算。
+ */
 uint8_t arm_dual_imu_get_state(Arm_Dual_Imu_State_t *state)
 {
     if (state == NULL) return 0U;
