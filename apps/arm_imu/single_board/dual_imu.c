@@ -5,6 +5,7 @@
 #include "onboard_imu.h"
 #include "pose_solver.h"
 #include "bsp_def.h"
+#include "bsp_led.h"
 #include "cmsis_compiler.h"
 #include "tx_api.h"
 
@@ -26,8 +27,26 @@ typedef struct
 static TX_THREAD                  g_arm_dual_imu_thread;
 APPS_STACK_SECTION static uint8_t g_arm_dual_imu_stack[ARM_DUAL_IMU_TASK_STACK_SIZE];
 static Arm_Dual_Imu_Context_t     g_arm_dual_imu_context;
+/* 2 means no status has been shown yet. */
+static uint8_t                    g_arm_dual_imu_led_green = 2U;
 
 volatile Arm_Dual_Imu_State_t g_arm_dual_imu_state;
+
+/**
+ * @brief 根据三路 IMU 在线状态更新板载 RGB 指示灯。
+ * @param state 当前三 IMU 状态快照。
+ * @retval 无。
+ * @note 三路均在有效超时窗口内时显示绿灯；任一路掉线、未初始化或数据无效时显示红灯。
+ *       仅在颜色变化时写 LED，避免高频重复发送 WS2812/PWM 数据。
+ */
+static void arm_dual_imu_update_status_led(const Arm_Dual_Imu_State_t *state)
+{
+    uint8_t all_online = (state->upper_imu_valid != 0U && state->forearm_imu_valid != 0U && state->hand_imu_valid != 0U) ? 1U : 0U;
+    if (g_arm_dual_imu_led_green == all_online) return;
+
+    g_arm_dual_imu_led_green = all_online;
+    BSP_LED_Show(all_online != 0U ? LED_Green : LED_Red);
+}
 
 /**
  * @brief 以序列锁方式发布完整三 IMU 解算状态。
@@ -130,6 +149,8 @@ static void arm_dual_imu_calculate(Arm_Dual_Imu_Context_t *context)
             ? 1U
             : 0U;
 
+    arm_dual_imu_update_status_led(state);
+
     if (state->upper_imu_valid != 0U) arm_imu_math_quaternion_to_rotation(state->upper_quaternion, upper_raw);
     if (state->forearm_imu_valid != 0U) arm_imu_math_quaternion_to_rotation(state->forearm_quaternion, forearm_raw);
     if (state->hand_imu_valid != 0U) arm_imu_math_quaternion_to_rotation(state->hand_quaternion, hand_raw);
@@ -177,6 +198,8 @@ void arm_dual_imu_init(void)
 {
     memset(&g_arm_dual_imu_context, 0, sizeof(g_arm_dual_imu_context));
     memset((void *)&g_arm_dual_imu_state, 0, sizeof(g_arm_dual_imu_state));
+    g_arm_dual_imu_led_green = 2U;
+    BSP_LED_Show(LED_Red);
     arm_pose_solver_init(&g_arm_dual_imu_context.pose_solver);
     arm_onboard_imu_init();
 

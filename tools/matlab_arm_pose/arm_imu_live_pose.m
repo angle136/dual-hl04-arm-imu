@@ -180,7 +180,7 @@ while isgraphics(figureHandle) && ~getappdata(figureHandle, 'StopRequested')
 
     if ~receivedPose && toc(lastPoseTime) > settings.noPoseTimeoutSeconds
         error(['RTT is connected, but no ARMPOSE records were received. ', ...
-               'Build and flash the arm_imu firmware containing the MATLAB telemetry output.']);
+               'Disconnect Ozone/Cortex-Debug/OpenOCD first, then check the arm_imu firmware and ARM_IMU_DEBUG_ENABLE.']);
     end
     if parsedThisPass
         drawnow limitrate;
@@ -279,13 +279,49 @@ error(['JLinkRTTLogger.exe was not found. Install the SEGGER J-Link Software Pac
 end
 
 function assertProbeIsFree
-processNames = {'JLinkGUIServer.exe', 'JLinkGDBServer.exe', 'JLinkGDBServerCL.exe', 'JLinkRTTLogger.exe', 'openocd.exe'};
+processNames = {'Ozone.exe', 'JLink.exe', 'JLinkRTTViewer.exe', ...
+    'JLinkGUIServer.exe', 'JLinkGDBServer.exe', 'JLinkGDBServerCL.exe', ...
+    'JLinkRTTLogger.exe', 'openocd.exe'};
+busyNames = {};
 for index = 1:numel(processNames)
     command = sprintf('tasklist /NH /FI "IMAGENAME eq %s"', processNames{index});
     [~, output] = system(command);
     if contains(lower(output), lower(processNames{index}))
-        error('%s is already using or may be using the debug probe. Close it first.', processNames{index});
+        busyNames{end + 1} = processNames{index}; %#ok<AGROW>
     end
+end
+if isempty(busyNames)
+    return;
+end
+
+message = sprintf(['The following programs may be using the J-Link:\n%s\n\n' ...
+                   'Terminate them and continue?\n' ...
+                   'This only closes debug tools; it does not reset or write the target.'], ...
+                   strjoin(busyNames, newline));
+choice = questdlg(message, 'Release J-Link', 'Terminate and continue', 'Cancel', 'Cancel');
+if ~strcmp(choice, 'Terminate and continue')
+    error('arm_imu_live_pose:ProbeBusy', ...
+        'The J-Link is still in use. Startup cancelled.');
+end
+
+for index = 1:numel(busyNames)
+    command = sprintf('taskkill /F /T /IM "%s" >NUL 2>&1', busyNames{index});
+    system(command);
+end
+pause(0.5);
+
+remaining = {};
+for index = 1:numel(processNames)
+    command = sprintf('tasklist /NH /FI "IMAGENAME eq %s"', processNames{index});
+    [~, output] = system(command);
+    if contains(lower(output), lower(processNames{index}))
+        remaining{end + 1} = processNames{index}; %#ok<AGROW>
+    end
+end
+if ~isempty(remaining)
+    error('arm_imu_live_pose:ProbeBusy', ...
+        'Could not terminate J-Link processes: %s. Close them manually and retry.', ...
+        strjoin(remaining, ', '));
 end
 end
 
