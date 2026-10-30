@@ -13,6 +13,9 @@ target_compile_options(utils PRIVATE -O2)
 set(_rtt_up_buffer_count 1)
 if(ARM_IMU_DEBUG_RTT_ENABLE)
     math(EXPR _rtt_up_buffer_count "${ARM_IMU_DEBUG_RTT_CHANNEL} + 1")
+    if(ARM_IMU_DEBUG_POSE_RTT_CHANNEL GREATER_EQUAL ARM_IMU_DEBUG_RTT_CHANNEL)
+        math(EXPR _rtt_up_buffer_count "${ARM_IMU_DEBUG_POSE_RTT_CHANNEL} + 1")
+    endif()
 endif()
 target_compile_definitions(utils PUBLIC
     SEGGER_RTT_MAX_NUM_UP_BUFFERS=${_rtt_up_buffer_count}
