@@ -91,7 +91,7 @@ Revision: $Rev: 24316 $
 // Up-channel 1: SystemView
 //
 #ifndef SEGGER_RTT_MAX_NUM_UP_BUFFERS
-#define SEGGER_RTT_MAX_NUM_UP_BUFFERS (1) // Max. number of up-buffers (T->H) available on this target    (Default: 3)
+#define SEGGER_RTT_MAX_NUM_UP_BUFFERS (3) // 0=日志，1=六轴二进制帧，2=ARMPOSE 文本帧
 #endif
 //
 // Most common case:

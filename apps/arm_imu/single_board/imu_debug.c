@@ -12,6 +12,7 @@
 #endif
 
 #include <math.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -35,10 +36,12 @@ APPS_STACK_SECTION static uint8_t g_arm_imu_debug_stack[ARM_IMU_DEBUG_TASK_STACK
 
 #if (ARM_IMU_DEBUG_RTT_ENABLE != 0)
 static uint8_t g_arm_imu_debug_rtt_buffer[ARM_IMU_DEBUG_RTT_BUFFER_SIZE];
+static uint8_t g_arm_imu_debug_pose_rtt_buffer[ARM_IMU_DEBUG_RTT_BUFFER_SIZE];
 static uint8_t g_arm_imu_debug_frame[ARM_IMU_DEBUG_FRAME_SIZE];
 static float   g_arm_imu_debug_last_valid_joint[ARM_DUAL_IMU_IK_DOF];
 static uint8_t g_arm_imu_debug_sequence;
 static uint8_t g_arm_imu_debug_rtt_ready;
+static uint8_t g_arm_imu_debug_pose_rtt_ready;
 static uint8_t g_arm_imu_debug_have_valid_joint;
 #endif
 
@@ -183,11 +186,24 @@ static void arm_imu_debug_log_matlab_pose(const Arm_Dual_Imu_State_t *state)
     }
 
     /* 前 13 个字段保持旧协议顺序；手背有效位和四元数只追加在尾部。 */
-    LOG_RAW("ARMPOSE,%lu,%u,%u,%u,%lu,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%u,%ld,%ld,%ld,%ld\r\n", (unsigned long)state->sequence,
-            (unsigned)state->upper_imu_valid, (unsigned)state->forearm_imu_valid, (unsigned)state->calibrated, (unsigned long)state->zero_count,
-            (long)upper_quaternion[0], (long)upper_quaternion[1], (long)upper_quaternion[2], (long)upper_quaternion[3], (long)forearm_quaternion[0],
-            (long)forearm_quaternion[1], (long)forearm_quaternion[2], (long)forearm_quaternion[3], (unsigned)state->hand_imu_valid,
-            (long)hand_quaternion[0], (long)hand_quaternion[1], (long)hand_quaternion[2], (long)hand_quaternion[3]);
+    char pose_line[256];
+    int  pose_length = snprintf(pose_line, sizeof(pose_line),
+                                "ARMPOSE,%lu,%u,%u,%u,%lu,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%u,%ld,%ld,%ld,%ld\r\n",
+                                (unsigned long)state->sequence, (unsigned)state->upper_imu_valid, (unsigned)state->forearm_imu_valid,
+                                (unsigned)state->calibrated, (unsigned long)state->zero_count, (long)upper_quaternion[0],
+                                (long)upper_quaternion[1], (long)upper_quaternion[2], (long)upper_quaternion[3], (long)forearm_quaternion[0],
+                                (long)forearm_quaternion[1], (long)forearm_quaternion[2], (long)forearm_quaternion[3],
+                                (unsigned)state->hand_imu_valid, (long)hand_quaternion[0], (long)hand_quaternion[1], (long)hand_quaternion[2],
+                                (long)hand_quaternion[3]);
+    if (pose_length > 0 && (size_t)pose_length < sizeof(pose_line))
+    {
+        /* 保留 Channel 0 兼容输出；MATLAB 新工具改读独立 Channel 2。 */
+        LOG_RAW("%s", pose_line);
+#if (ARM_IMU_DEBUG_RTT_ENABLE != 0)
+        if (g_arm_imu_debug_pose_rtt_ready != 0U)
+            (void)SEGGER_RTT_Write(ARM_IMU_DEBUG_POSE_RTT_CHANNEL, pose_line, (unsigned)pose_length);
+#endif
+    }
 }
 
 #if (ARM_IMU_DEBUG_RTT_ENABLE != 0)
@@ -269,6 +285,12 @@ void arm_imu_debug_init(void)
                                                SEGGER_RTT_MODE_NO_BLOCK_SKIP);
     g_arm_imu_debug_rtt_ready = (rtt_result == 0) ? 1U : 0U;
     if (rtt_result != 0) LOG_E("joint RTT channel init failed: channel=%u result=%d", (unsigned)ARM_IMU_DEBUG_RTT_CHANNEL, rtt_result);
+
+    int pose_rtt_result = SEGGER_RTT_ConfigUpBuffer(ARM_IMU_DEBUG_POSE_RTT_CHANNEL, "ArmPose", g_arm_imu_debug_pose_rtt_buffer,
+                                                    sizeof(g_arm_imu_debug_pose_rtt_buffer), SEGGER_RTT_MODE_NO_BLOCK_SKIP);
+    g_arm_imu_debug_pose_rtt_ready = (pose_rtt_result == 0) ? 1U : 0U;
+    if (pose_rtt_result != 0)
+        LOG_E("pose RTT channel init failed: channel=%u result=%d", (unsigned)ARM_IMU_DEBUG_POSE_RTT_CHANNEL, pose_rtt_result);
 #endif
 
     UINT status =

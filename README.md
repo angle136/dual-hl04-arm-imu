@@ -11,7 +11,8 @@ STM32F407 + ThreadX 三 IMU 三段手臂姿态采集与机械臂位姿解算工�
 - CAN 协议：CANopen 标准帧，节点 8，TPDO4 四元数 ID `0x488`；
 - 三段长度：大臂 `0.204 m`、前臂 `0.120 m`、腕部到手部目标点 `0.090 m`；
 - 手动标零：板载 KEY（PA0）；
-- J-Link RTT Channel 0：`ARMPOSE` 文本姿态；
+- J-Link RTT Channel 0：普通日志；
+- J-Link RTT Channel 2：`ARMPOSE` 文本姿态；
 - J-Link RTT Channel 1：兼容机械臂板间协议的 36 字节六轴逆解帧。
 
 本 APP 不初始化或控制电机。两只 HL04 与 BMI088 的姿态、三段位置链和六轴解析逆解均用于观测、调试和后续集成。

@@ -10,7 +10,7 @@ buffer; it does not flash, reset, or write target memory.
 
 Firmware RTT telemetry is isolated in `apps/arm_imu/single_board/imu_debug.c`.
 Set `ARM_IMU_DEBUG_ENABLE` to `0` in `apps/arm_imu/robot.cmake` to remove the
-debug thread and all `ARMPOSE` output from the firmware.
+debug thread and all `ARMPOSE` output from the firmware on RTT Channel 2.
 
 Press the DJI C board's `KEY` button (PA0) to capture the current valid upper-arm,
 forearm, and hand orientations as the new software zero pose. The request remains

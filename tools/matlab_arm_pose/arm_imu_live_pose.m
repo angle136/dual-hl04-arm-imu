@@ -18,7 +18,7 @@ logPath = [tempname, '.log'];
 logStream = [];
 figureHandle = [];
 
-loggerArgs = sprintf('-Device %s -If %s -Speed %d -RTTChannel 0 "%s"', ...
+loggerArgs = sprintf('-Device %s -If %s -Speed %d -RTTChannel 2 "%s"', ...
     settings.device, settings.interface, settings.speedKHz, logPath);
 startInfo = System.Diagnostics.ProcessStartInfo();
 startInfo.FileName = loggerExe;

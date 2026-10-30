@@ -1,10 +1,12 @@
 # 三 IMU 三段原坐标姿态
 
-该工具位于仓库的 `tools/` 目录，只读取 J-Link RTT Channel 0 中的
+该工具位于仓库的 `tools/` 目录，只读取 J-Link RTT Channel 2 中的
 `ARMPOSE` 文本帧，不加载 URDF，不执行 IK，不复位、暂停或烧写芯片。
 
 双击 `start_imu_raw_pose.bat` 一键启动。启动前需关闭 Ozone、Cortex-Debug、
 OpenOCD 和其他 J-Link RTT Logger。
+
+RTT 通道约定为：Channel 0 普通日志、Channel 1 六轴二进制帧、Channel 2 `ARMPOSE` 文本帧。
 
 画面只包含：
 
@@ -23,7 +25,7 @@ p_wrist = p_elbow + R_forearm * [0.120, 0, 0]^T
 p_hand  = p_wrist + R_hand    * [0.090, 0, 0]^T
 ```
 
-三个姿态直接使用 Channel 0 中的 `[w,x,y,z]` 四元数，不套用
+三个姿态直接使用 Channel 2 中的 `[w,x,y,z]` 四元数，不套用
 MATLAB 机械臂的关节取反、URDF 零位偏置或末端坐标转换。固件完成
 软件标零后，`ARMPOSE` 中的四元数是相对最新标零姿态的旋转。
 
