@@ -19,7 +19,6 @@ assertProbeIsFree();
 loggerExe = findRttLogger();
 logPath = [tempname, '.log'];
 logStream = [];
-logReader = [];
 figureHandle = [];
 
 loggerArgs = sprintf('-Device %s -If %s -Speed %d -RTTChannel 0 "%s"', ...
@@ -47,7 +46,6 @@ try
                 logStream = System.IO.FileStream(logPath, ...
                     System.IO.FileMode.Open, System.IO.FileAccess.Read, ...
                     System.IO.FileShare.ReadWrite);
-                logReader = System.IO.StreamReader(logStream);
                 break;
             catch openException
                 openMessage = openException.message;
@@ -55,7 +53,7 @@ try
         end
         pause(0.05);
     end
-    if isempty(logReader)
+    if isempty(logStream)
         error('arm_imu_live_pose:OpenTimeout', ...
             '10 秒内未能打开 RTT Channel 0 输出：%s', openMessage);
     end
@@ -78,7 +76,7 @@ try
                 'JLinkRTTLogger 已停止，请检查 J-Link 连接和板子供电。');
         end
 
-        chunk = char(logReader.ReadToEnd());
+        chunk = readAvailableText(logStream);
         if ~isempty(chunk)
             lineBuffer = [lineBuffer, chunk]; %#ok<AGROW>
         end
@@ -102,10 +100,38 @@ try
         end
     end
 
-    cleanupResources(loggerProcess, logReader, logStream, figureHandle, logPath);
+    cleanupResources(loggerProcess, logStream, figureHandle, logPath);
 catch exception
-    cleanupResources(loggerProcess, logReader, logStream, figureHandle, logPath);
+    cleanupResources(loggerProcess, logStream, figureHandle, logPath);
     rethrow(exception);
+end
+end
+
+function text = readAvailableText(logStream)
+%READAVAILABLETEXT Read only bytes already appended to the RTT log file.
+text = '';
+if isempty(logStream) || ~logStream.CanRead
+    return;
+end
+
+try
+    fileLength = double(logStream.Length);
+    if double(logStream.Position) > fileLength
+        logStream.Position = 0;
+    end
+    availableBytes = fileLength - double(logStream.Position);
+    if availableBytes <= 0
+        return;
+    end
+
+    readLength = min(8192, floor(availableBytes));
+    byteBuffer = zeros(1, readLength, 'uint8');
+    bytesRead = double(logStream.Read(byteBuffer, 0, readLength));
+    if bytesRead > 0
+        text = char(byteBuffer(1:bytesRead));
+    end
+catch
+    % The logger may rotate or close the file while MATLAB is polling it.
 end
 end
 
@@ -395,13 +421,8 @@ else
 end
 end
 
-function cleanupResources(loggerProcess, logReader, logStream, figureHandle, logPath)
-if ~isempty(logReader)
-    try
-        logReader.Dispose();
-    catch
-    end
-elseif ~isempty(logStream)
+function cleanupResources(loggerProcess, logStream, figureHandle, logPath)
+if ~isempty(logStream)
     try
         logStream.Dispose();
     catch

@@ -15,4 +15,4 @@ if not defined MATLAB_EXE (
     exit /b 1
 )
 
-start "" "%MATLAB_EXE%" -sd "%TOOL_DIR%" -r "arm_imu_raw_pose"
+start "" "%MATLAB_EXE%" -nosplash -softwareopengl -sd "%TOOL_DIR%" -r "try, arm_imu_raw_pose; catch exception, disp(getReport(exception,'extended')); end"
