@@ -43,10 +43,12 @@ try
         end
         if isfile(logPath)
             try
-                logStream = System.IO.FileStream(logPath, ...
-                    System.IO.FileMode.Open, System.IO.FileAccess.Read, ...
-                    System.IO.FileShare.ReadWrite);
-                break;
+                candidateStream = fopen(logPath, 'r');
+                if candidateStream >= 0
+                    logStream = candidateStream;
+                    break;
+                end
+                openMessage = 'MATLAB 无法以共享读方式打开 RTT 输出文件。';
             catch openException
                 openMessage = openException.message;
             end
@@ -110,25 +112,30 @@ end
 function text = readAvailableText(logStream)
 %READAVAILABLETEXT Read only bytes already appended to the RTT log file.
 text = '';
-if isempty(logStream) || ~logStream.CanRead
+if isempty(logStream) || ~isscalar(logStream) || logStream < 0
     return;
 end
 
 try
-    fileLength = double(logStream.Length);
-    if double(logStream.Position) > fileLength
-        logStream.Position = 0;
+    currentPosition = ftell(logStream);
+    fseek(logStream, 0, 'eof');
+    fileLength = ftell(logStream);
+    if currentPosition < 0 || fileLength < 0
+        return;
     end
-    availableBytes = fileLength - double(logStream.Position);
+    if currentPosition > fileLength
+        currentPosition = 0;
+    end
+    availableBytes = fileLength - currentPosition;
     if availableBytes <= 0
         return;
     end
 
+    fseek(logStream, currentPosition, 'bof');
     readLength = min(8192, floor(availableBytes));
-    byteBuffer = zeros(1, readLength, 'uint8');
-    bytesRead = double(logStream.Read(byteBuffer, 0, readLength));
-    if bytesRead > 0
-        text = char(byteBuffer(1:bytesRead));
+    byteBuffer = fread(logStream, readLength, '*uint8')';
+    if ~isempty(byteBuffer)
+        text = char(byteBuffer);
     end
 catch
     % The logger may rotate or close the file while MATLAB is polling it.
@@ -422,9 +429,9 @@ end
 end
 
 function cleanupResources(loggerProcess, logStream, figureHandle, logPath)
-if ~isempty(logStream)
+if ~isempty(logStream) && isscalar(logStream) && logStream >= 0
     try
-        logStream.Dispose();
+        fclose(logStream);
     catch
     end
 end
