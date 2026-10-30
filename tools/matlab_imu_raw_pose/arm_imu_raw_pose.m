@@ -474,46 +474,51 @@ error('arm_imu_live_pose:LoggerNotFound', ...
 end
 
 function assertProbeIsFree
-processNames = {'Ozone.exe', 'JLink.exe', 'JLinkRTTViewer.exe', ...
-    'JLinkGUIServer.exe', 'JLinkGDBServer.exe', 'JLinkGDBServerCL.exe', ...
-    'JLinkRTTLogger.exe', 'openocd.exe'};
+% 通过 .NET 直接枚举 PID；不依赖 tasklist 文本和管理员可见性。
+processNames = {'Ozone', 'JLink', 'JLinkRTTViewer', 'JLinkGUIServer', ...
+    'JLinkGDBServer', 'JLinkGDBServerCL', 'JLinkRTTLogger', ...
+    'JLinkRemoteServer', 'JLinkRemoteServerCL', 'openocd'};
+busyPids = [];
 busyNames = {};
 for index = 1:numel(processNames)
-    command = sprintf('tasklist /NH /FI "IMAGENAME eq %s"', processNames{index});
-    [~, output] = system(command);
-    if contains(lower(output), lower(processNames{index}))
-        busyNames{end + 1} = processNames{index}; %#ok<AGROW>
+    processes = System.Diagnostics.Process.GetProcessesByName(processNames{index});
+    for processIndex = 1:numel(processes)
+        try
+            if ~processes(processIndex).HasExited
+                busyPids(end + 1) = processes(processIndex).Id; %#ok<AGROW>
+                busyNames{end + 1} = processNames{index}; %#ok<AGROW>
+            end
+        catch
+            % 进程可能在枚举期间自行退出，忽略这个 PID。
+        end
     end
 end
-if isempty(busyNames)
+if isempty(busyPids)
     return;
 end
 
-message = sprintf(['检测到以下程序可能占用 J-Link：\n%s\n\n' ...
-                   '是否结束这些进程并继续启动？\n' ...
-                   '这只会结束调试工具，不会复位或写入芯片。'], strjoin(busyNames, newline));
-choice = questdlg(message, '释放 J-Link', '结束并继续', '取消', '取消');
-if ~strcmp(choice, '结束并继续')
-    error('arm_imu_live_pose:ProbeBusy', ...
-        'J-Link 仍被占用。已取消启动。');
-end
-
-for index = 1:numel(busyNames)
-    command = sprintf('taskkill /F /T /IM "%s" >NUL 2>&1', busyNames{index});
+fprintf(1, '释放 J-Link：%s\n', strjoin(unique(busyNames, 'stable'), ', '));
+for index = 1:numel(busyPids)
+    command = sprintf('taskkill /PID %d /T /F >NUL 2>&1', busyPids(index));
     system(command);
 end
 pause(0.5);
 
 remaining = {};
 for index = 1:numel(processNames)
-    command = sprintf('tasklist /NH /FI "IMAGENAME eq %s"', processNames{index});
-    [~, output] = system(command);
-    if contains(lower(output), lower(processNames{index}))
-        remaining{end + 1} = processNames{index}; %#ok<AGROW>
+    processes = System.Diagnostics.Process.GetProcessesByName(processNames{index});
+    for processIndex = 1:numel(processes)
+        try
+            if ~processes(processIndex).HasExited
+                remaining{end + 1} = processNames{index}; %#ok<AGROW>
+            end
+        catch
+        end
     end
 end
 if ~isempty(remaining)
     error('arm_imu_live_pose:ProbeBusy', ...
-        '无法结束 J-Link 占用进程：%s。请手动关闭后重试。', strjoin(remaining, ', '));
+        '无法自动结束 J-Link 占用进程：%s。请以管理员权限关闭后重试。', ...
+        strjoin(unique(remaining, 'stable'), ', '));
 end
 end

@@ -279,49 +279,52 @@ error(['JLinkRTTLogger.exe was not found. Install the SEGGER J-Link Software Pac
 end
 
 function assertProbeIsFree
-processNames = {'Ozone.exe', 'JLink.exe', 'JLinkRTTViewer.exe', ...
-    'JLinkGUIServer.exe', 'JLinkGDBServer.exe', 'JLinkGDBServerCL.exe', ...
-    'JLinkRTTLogger.exe', 'openocd.exe'};
+% Enumerate PIDs through .NET; do not depend on tasklist text or visibility.
+processNames = {'Ozone', 'JLink', 'JLinkRTTViewer', 'JLinkGUIServer', ...
+    'JLinkGDBServer', 'JLinkGDBServerCL', 'JLinkRTTLogger', ...
+    'JLinkRemoteServer', 'JLinkRemoteServerCL', 'openocd'};
+busyPids = [];
 busyNames = {};
 for index = 1:numel(processNames)
-    command = sprintf('tasklist /NH /FI "IMAGENAME eq %s"', processNames{index});
-    [~, output] = system(command);
-    if contains(lower(output), lower(processNames{index}))
-        busyNames{end + 1} = processNames{index}; %#ok<AGROW>
+    processes = System.Diagnostics.Process.GetProcessesByName(processNames{index});
+    for processIndex = 1:numel(processes)
+        try
+            if ~processes(processIndex).HasExited
+                busyPids(end + 1) = processes(processIndex).Id; %#ok<AGROW>
+                busyNames{end + 1} = processNames{index}; %#ok<AGROW>
+            end
+        catch
+            % The process may exit while it is being enumerated.
+        end
     end
 end
-if isempty(busyNames)
+if isempty(busyPids)
     return;
 end
 
-message = sprintf(['The following programs may be using the J-Link:\n%s\n\n' ...
-                   'Terminate them and continue?\n' ...
-                   'This only closes debug tools; it does not reset or write the target.'], ...
-                   strjoin(busyNames, newline));
-choice = questdlg(message, 'Release J-Link', 'Terminate and continue', 'Cancel', 'Cancel');
-if ~strcmp(choice, 'Terminate and continue')
-    error('arm_imu_live_pose:ProbeBusy', ...
-        'The J-Link is still in use. Startup cancelled.');
-end
-
-for index = 1:numel(busyNames)
-    command = sprintf('taskkill /F /T /IM "%s" >NUL 2>&1', busyNames{index});
+fprintf(1, 'Releasing J-Link: %s\n', strjoin(unique(busyNames, 'stable'), ', '));
+for index = 1:numel(busyPids)
+    command = sprintf('taskkill /PID %d /T /F >NUL 2>&1', busyPids(index));
     system(command);
 end
 pause(0.5);
 
 remaining = {};
 for index = 1:numel(processNames)
-    command = sprintf('tasklist /NH /FI "IMAGENAME eq %s"', processNames{index});
-    [~, output] = system(command);
-    if contains(lower(output), lower(processNames{index}))
-        remaining{end + 1} = processNames{index}; %#ok<AGROW>
+    processes = System.Diagnostics.Process.GetProcessesByName(processNames{index});
+    for processIndex = 1:numel(processes)
+        try
+            if ~processes(processIndex).HasExited
+                remaining{end + 1} = processNames{index}; %#ok<AGROW>
+            end
+        catch
+        end
     end
 end
 if ~isempty(remaining)
     error('arm_imu_live_pose:ProbeBusy', ...
-        'Could not terminate J-Link processes: %s. Close them manually and retry.', ...
-        strjoin(remaining, ', '));
+        'Could not terminate J-Link processes automatically: %s. Close them as administrator.', ...
+        strjoin(unique(remaining, 'stable'), ', '));
 end
 end
 
