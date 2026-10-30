@@ -24,7 +24,7 @@
 #define ARM_IMU_DEBUG_STREAM_PERIOD_TICKS (TX_TIMER_TICKS_PER_SECOND / ARM_IMU_DEBUG_STREAM_HZ)
 #define ARM_IMU_DEBUG_STATUS_PERIOD_TICKS TX_TIMER_TICKS_PER_SECOND
 #define ARM_IMU_DEBUG_QUATERNION_SCALE    1000000.0f
-#define ARM_IMU_DEBUG_TASK_STACK_SIZE     1024U
+#define ARM_IMU_DEBUG_TASK_STACK_SIZE     2048U
 #define ARM_IMU_DEBUG_TASK_PRIORITY       20U
 #define ARM_IMU_DEBUG_FRAME_HEADER        0xAAU
 #define ARM_IMU_DEBUG_FRAME_PAYLOAD_SIZE  32U
@@ -33,6 +33,8 @@
 
 static TX_THREAD                  g_arm_imu_debug_thread;
 APPS_STACK_SECTION static uint8_t g_arm_imu_debug_stack[ARM_IMU_DEBUG_TASK_STACK_SIZE];
+static Arm_Dual_Imu_State_t       g_arm_imu_debug_state;
+static char                        g_arm_imu_debug_pose_line[256];
 
 #if (ARM_IMU_DEBUG_RTT_ENABLE != 0)
 static uint8_t g_arm_imu_debug_rtt_buffer[ARM_IMU_DEBUG_RTT_BUFFER_SIZE];
@@ -186,8 +188,7 @@ static void arm_imu_debug_log_matlab_pose(const Arm_Dual_Imu_State_t *state)
     }
 
     /* 前 13 个字段保持旧协议顺序；手背有效位和四元数只追加在尾部。 */
-    char pose_line[256];
-    int  pose_length = snprintf(pose_line, sizeof(pose_line),
+    int pose_length = snprintf(g_arm_imu_debug_pose_line, sizeof(g_arm_imu_debug_pose_line),
                                 "ARMPOSE,%lu,%u,%u,%u,%lu,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%u,%ld,%ld,%ld,%ld\r\n",
                                 (unsigned long)state->sequence, (unsigned)state->upper_imu_valid, (unsigned)state->forearm_imu_valid,
                                 (unsigned)state->calibrated, (unsigned long)state->zero_count, (long)upper_quaternion[0],
@@ -195,13 +196,13 @@ static void arm_imu_debug_log_matlab_pose(const Arm_Dual_Imu_State_t *state)
                                 (long)forearm_quaternion[1], (long)forearm_quaternion[2], (long)forearm_quaternion[3],
                                 (unsigned)state->hand_imu_valid, (long)hand_quaternion[0], (long)hand_quaternion[1], (long)hand_quaternion[2],
                                 (long)hand_quaternion[3]);
-    if (pose_length > 0 && (size_t)pose_length < sizeof(pose_line))
+    if (pose_length > 0 && (size_t)pose_length < sizeof(g_arm_imu_debug_pose_line))
     {
         /* 保留 Channel 0 兼容输出；MATLAB 新工具改读独立 Channel 2。 */
-        LOG_RAW("%s", pose_line);
+        LOG_RAW("%s", g_arm_imu_debug_pose_line);
 #if (ARM_IMU_DEBUG_RTT_ENABLE != 0)
         if (g_arm_imu_debug_pose_rtt_ready != 0U)
-            (void)SEGGER_RTT_Write(ARM_IMU_DEBUG_POSE_RTT_CHANNEL, pose_line, (unsigned)pose_length);
+            (void)SEGGER_RTT_Write(ARM_IMU_DEBUG_POSE_RTT_CHANNEL, g_arm_imu_debug_pose_line, (unsigned)pose_length);
 #endif
     }
 }
@@ -247,22 +248,21 @@ static void arm_imu_debug_task_entry(ULONG thread_input)
 {
     (void)thread_input;
     ULONG                status_elapsed_ticks = ARM_IMU_DEBUG_STATUS_PERIOD_TICKS;
-    Arm_Dual_Imu_State_t state;
 
     while (1)
     {
-        uint8_t snapshot_valid = arm_dual_imu_get_state(&state);
+        uint8_t snapshot_valid = arm_dual_imu_get_state(&g_arm_imu_debug_state);
         if (snapshot_valid != 0U)
         {
-            arm_imu_debug_log_matlab_pose(&state);
+            arm_imu_debug_log_matlab_pose(&g_arm_imu_debug_state);
 #if (ARM_IMU_DEBUG_RTT_ENABLE != 0)
-            arm_imu_debug_stream_joint_frame(&state);
+            arm_imu_debug_stream_joint_frame(&g_arm_imu_debug_state);
 #endif
         }
         if (status_elapsed_ticks >= ARM_IMU_DEBUG_STATUS_PERIOD_TICKS)
         {
             if (snapshot_valid != 0U)
-                arm_imu_debug_log_status(&state);
+                arm_imu_debug_log_status(&g_arm_imu_debug_state);
             else
                 LOG_W("snapshot busy");
             status_elapsed_ticks = 0U;
