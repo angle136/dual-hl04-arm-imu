@@ -2,9 +2,9 @@
 
 #if (ARM_IMU_DEBUG_ENABLE != 0)
 
-#include "arm_imu_debug.h"
+#include "imu_debug.h"
 
-#include "arm_dual_imu.h"
+#include "dual_imu.h"
 #include "tx_api.h"
 
 #if (ARM_IMU_DEBUG_RTT_ENABLE != 0)
@@ -126,25 +126,28 @@ static void arm_imu_debug_rotation_to_quaternion(const float rotation[3][3], flo
 }
 
 /**
- * @brief 输出双 IMU 有效性、收包统计、末端位置和逆解角摘要。
- * @param state 输入一致的双 IMU 状态快照。
+ * @brief 输出三 IMU 有效性、收包统计、三段位置和逆解角摘要。
+ * @param state 输入一致的三 IMU 状态快照。
  * @retval 无。
  * @note 调用关系：由调试线程按 ARM_IMU_DEBUG_STATUS_PERIOD_TICKS 周期调用。
  */
 static void arm_imu_debug_log_status(const Arm_Dual_Imu_State_t *state)
 {
-    LOG_I("valid upper=%u forearm=%u cal=%u zero=%lu pose=%u ik=%u", (unsigned)state->upper_imu_valid, (unsigned)state->forearm_imu_valid,
-          (unsigned)state->calibrated, (unsigned long)state->zero_count, (unsigned)state->pose_valid, (unsigned)state->ik_valid);
-    LOG_I("rx uart[pkt=%lu frame=%lu] can[pkt=%lu frame=%lu]", (unsigned long)state->upper_packet_count,
-          (unsigned long)state->upper_frame_error_count, (unsigned long)state->forearm_packet_count, (unsigned long)state->forearm_frame_error_count);
-    LOG_I("target p=[%.3f %.3f %.3f] q=[%.3f %.3f %.3f %.3f %.3f %.3f]", state->target_position_m[0], state->target_position_m[1],
-          state->target_position_m[2], state->legacy_joint_target_rad[0], state->legacy_joint_target_rad[1], state->legacy_joint_target_rad[2],
-          state->legacy_joint_target_rad[3], state->legacy_joint_target_rad[4], state->legacy_joint_target_rad[5]);
+    LOG_I("valid upper=%u forearm=%u hand=%u cal=%u zero=%lu pose=%u ik=%u", (unsigned)state->upper_imu_valid, (unsigned)state->forearm_imu_valid,
+          (unsigned)state->hand_imu_valid, (unsigned)state->calibrated, (unsigned long)state->zero_count, (unsigned)state->pose_valid,
+          (unsigned)state->ik_valid);
+    LOG_I("rx uart[pkt=%lu err=%lu] can[pkt=%lu err=%lu] bmi088[update=%lu]", (unsigned long)state->upper_packet_count,
+          (unsigned long)state->upper_frame_error_count, (unsigned long)state->forearm_packet_count, (unsigned long)state->forearm_frame_error_count,
+          (unsigned long)state->hand_update_count);
+    LOG_I("wrist=[%.3f %.3f %.3f] hand=[%.3f %.3f %.3f]", state->wrist_position_m[0], state->wrist_position_m[1], state->wrist_position_m[2],
+          state->target_position_m[0], state->target_position_m[1], state->target_position_m[2]);
+    LOG_I("ik=[%.3f %.3f %.3f %.3f %.3f %.3f]", state->legacy_joint_target_rad[0], state->legacy_joint_target_rad[1],
+          state->legacy_joint_target_rad[2], state->legacy_joint_target_rad[3], state->legacy_joint_target_rad[4], state->legacy_joint_target_rad[5]);
 }
 
 /**
  * @brief 输出 MATLAB 可解析的 ARMPOSE 文本帧。
- * @param state 输入一致的双 IMU 状态快照。
+ * @param state 输入一致的三 IMU 状态快照。
  * @retval 无。
  * @note 调用关系：由调试线程按流输出周期调用；优先输出校准后的相对旋转，位姿无效时退回传感器原始四元数。
  */
@@ -152,10 +155,12 @@ static void arm_imu_debug_log_matlab_pose(const Arm_Dual_Imu_State_t *state)
 {
     float upper_pose_quaternion[4];
     float forearm_pose_quaternion[4];
+    float hand_pose_quaternion[4];
     if (state->pose_valid != 0U)
     {
         arm_imu_debug_rotation_to_quaternion(state->upper_rotation, upper_pose_quaternion);
         arm_imu_debug_rotation_to_quaternion(state->forearm_rotation, forearm_pose_quaternion);
+        arm_imu_debug_rotation_to_quaternion(state->hand_rotation, hand_pose_quaternion);
     }
     else
     {
@@ -163,27 +168,32 @@ static void arm_imu_debug_log_matlab_pose(const Arm_Dual_Imu_State_t *state)
         {
             upper_pose_quaternion[i]   = state->upper_quaternion[i];
             forearm_pose_quaternion[i] = state->forearm_quaternion[i];
+            hand_pose_quaternion[i]    = state->hand_quaternion[i];
         }
     }
 
     int32_t upper_quaternion[4];
     int32_t forearm_quaternion[4];
+    int32_t hand_quaternion[4];
     for (uint8_t i = 0U; i < 4U; ++i)
     {
         upper_quaternion[i]   = arm_imu_debug_quaternion_to_fixed(upper_pose_quaternion[i]);
         forearm_quaternion[i] = arm_imu_debug_quaternion_to_fixed(forearm_pose_quaternion[i]);
+        hand_quaternion[i]    = arm_imu_debug_quaternion_to_fixed(hand_pose_quaternion[i]);
     }
 
-    LOG_RAW("ARMPOSE,%lu,%u,%u,%u,%lu,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld\r\n", (unsigned long)state->sequence, (unsigned)state->upper_imu_valid,
-            (unsigned)state->forearm_imu_valid, (unsigned)state->calibrated, (unsigned long)state->zero_count, (long)upper_quaternion[0],
-            (long)upper_quaternion[1], (long)upper_quaternion[2], (long)upper_quaternion[3], (long)forearm_quaternion[0], (long)forearm_quaternion[1],
-            (long)forearm_quaternion[2], (long)forearm_quaternion[3]);
+    /* 前 13 个字段保持旧协议顺序；手背有效位和四元数只追加在尾部。 */
+    LOG_RAW("ARMPOSE,%lu,%u,%u,%u,%lu,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%u,%ld,%ld,%ld,%ld\r\n", (unsigned long)state->sequence,
+            (unsigned)state->upper_imu_valid, (unsigned)state->forearm_imu_valid, (unsigned)state->calibrated, (unsigned long)state->zero_count,
+            (long)upper_quaternion[0], (long)upper_quaternion[1], (long)upper_quaternion[2], (long)upper_quaternion[3], (long)forearm_quaternion[0],
+            (long)forearm_quaternion[1], (long)forearm_quaternion[2], (long)forearm_quaternion[3], (unsigned)state->hand_imu_valid,
+            (long)hand_quaternion[0], (long)hand_quaternion[1], (long)hand_quaternion[2], (long)hand_quaternion[3]);
 }
 
 #if (ARM_IMU_DEBUG_RTT_ENABLE != 0)
 /**
  * @brief 通过 SEGGER RTT 发布兼容板间协议格式的六轴逆解帧。
- * @param state 输入一致的双 IMU 状态快照。
+ * @param state 输入一致的三 IMU 状态快照。
  * @retval 无。
  * @note 调用关系：由调试线程在 RTT 启用时调用；逆解暂时无效时保持并发送最后一个有效关节目标。
  */
@@ -212,7 +222,7 @@ static void arm_imu_debug_stream_joint_frame(const Arm_Dual_Imu_State_t *state)
 #endif
 
 /**
- * @brief 双 IMU 调试与遥测线程入口。
+ * @brief 三 IMU 调试与遥测线程入口。
  * @param thread_input ThreadX 线程入口参数，当前未使用。
  * @retval 无，线程启动后持续运行。
  * @note 调用关系：由 arm_imu_debug_init() 创建；每周期读取一次一致快照，并输出 MATLAB 文本、可选 RTT 帧和低频状态日志。
@@ -247,10 +257,10 @@ static void arm_imu_debug_task_entry(ULONG thread_input)
 }
 
 /**
- * @brief 初始化可选 RTT 上行缓冲区并启动双 IMU 调试线程。
+ * @brief 初始化可选 RTT 上行缓冲区并启动三 IMU 调试线程。
  * @param 无。
  * @retval 无。
- * @note 调用关系：由 robot_control_init() 在双 IMU 主模块初始化后调用；线程创建失败只记录错误日志。
+ * @note 调用关系：由 robot_control_init() 在三 IMU 主模块初始化后调用；线程创建失败只记录错误日志。
  */
 void arm_imu_debug_init(void)
 {

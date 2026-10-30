@@ -62,10 +62,13 @@ lastPoseTime = tic;
 receivedPose = false;
 previousUpperQuaternion = [];
 previousForearmQuaternion = [];
+previousHandQuaternion = [];
 upperTimeHistory = [];
 upperEulerHistory = zeros(0, 3);
 forearmTimeHistory = [];
 forearmEulerHistory = zeros(0, 3);
+handTimeHistory = [];
+handEulerHistory = zeros(0, 3);
 lineBuffer = '';
 
 while isgraphics(figureHandle) && ~getappdata(figureHandle, 'StopRequested')
@@ -136,17 +139,42 @@ while isgraphics(figureHandle) && ~getappdata(figureHandle, 'StopRequested')
             updateFrame(plotState.forearmFrame, [1.8, 0, 0], eye(3), false);
         end
 
+        if sample.handValid
+            sample.handQuaternion = makeQuaternionContinuous(sample.handQuaternion, previousHandQuaternion);
+            previousHandQuaternion = sample.handQuaternion;
+            handRotation = quaternionToRotation(sample.handQuaternion);
+            handEuler = rotationToEulerZYX(handRotation);
+            updateFrame(plotState.handFrame, [3.6, 0, 0], handRotation, true);
+
+            handTimeHistory(end + 1, 1) = sampleTime; %#ok<AGROW>
+            handEulerHistory(end + 1, :) = handEuler; %#ok<AGROW>
+            keep = handTimeHistory >= sampleTime - settings.historySeconds;
+            handTimeHistory = handTimeHistory(keep);
+            handEulerHistory = handEulerHistory(keep, :);
+            set(plotState.handRollLine, 'XData', handTimeHistory, 'YData', handEulerHistory(:, 1));
+            set(plotState.handPitchLine, 'XData', handTimeHistory, 'YData', handEulerHistory(:, 2));
+            set(plotState.handYawLine, 'XData', handTimeHistory, 'YData', handEulerHistory(:, 3));
+            xlim(plotState.handEulerAxes, [max(0, sampleTime - settings.historySeconds), max(settings.historySeconds, sampleTime)]);
+        else
+            handEuler = [NaN, NaN, NaN];
+            updateFrame(plotState.handFrame, [3.6, 0, 0], eye(3), false);
+        end
+
         set(plotState.statusText, 'String', sprintf([ ...
-            'Sequence: %.0f\nUpper valid: %d\nForearm valid: %d\nCalibrated: %d\nZero count: %.0f\n\n', ...
+            'Sequence: %.0f\nUpper valid: %d\nForearm valid: %d\nHand valid: %d\nCalibrated: %d\nZero count: %.0f\n\n', ...
             'Upper quaternion [w x y z]\n[% .6f  % .6f  % .6f  % .6f]\n\n', ...
             'Upper ZYX Euler [deg]\nRoll  % 8.3f\nPitch % 8.3f\nYaw   % 8.3f\n\n', ...
             'Forearm quaternion [w x y z]\n[% .6f  % .6f  % .6f  % .6f]\n\n', ...
-            'Forearm ZYX Euler [deg]\nRoll  % 8.3f\nPitch % 8.3f\nYaw   % 8.3f'], ...
-            sample.sequence, sample.upperValid, sample.forearmValid, sample.calibrated, sample.zeroCount, ...
+            'Forearm ZYX Euler [deg]\nRoll  % 8.3f\nPitch % 8.3f\nYaw   % 8.3f\n\n', ...
+            'Hand quaternion [w x y z]\n[% .6f  % .6f  % .6f  % .6f]\n\n', ...
+            'Hand ZYX Euler [deg]\nRoll  % 8.3f\nPitch % 8.3f\nYaw   % 8.3f'], ...
+            sample.sequence, sample.upperValid, sample.forearmValid, sample.handValid, sample.calibrated, sample.zeroCount, ...
             sample.upperQuaternion(1), sample.upperQuaternion(2), sample.upperQuaternion(3), sample.upperQuaternion(4), ...
             upperEuler(1), upperEuler(2), upperEuler(3), ...
             sample.forearmQuaternion(1), sample.forearmQuaternion(2), sample.forearmQuaternion(3), sample.forearmQuaternion(4), ...
-            forearmEuler(1), forearmEuler(2), forearmEuler(3)));
+            forearmEuler(1), forearmEuler(2), forearmEuler(3), ...
+            sample.handQuaternion(1), sample.handQuaternion(2), sample.handQuaternion(3), sample.handQuaternion(4), ...
+            handEuler(1), handEuler(2), handEuler(3)));
     end
     if ~isempty(lineEnds)
         lineBuffer = lineBuffer(lineStart:end);
@@ -254,7 +282,9 @@ if numel(parts) < 11
     return;
 end
 fieldCount = 11;
-if numel(parts) >= 13
+if numel(parts) >= 18
+    fieldCount = 18;
+elseif numel(parts) >= 13
     fieldCount = 13;
 end
 values = str2double(parts(1:fieldCount));
@@ -265,11 +295,17 @@ end
 sample.sequence = values(1);
 sample.upperValid = logical(values(2));
 sample.forearmValid = logical(values(3));
-if fieldCount == 13
+sample.handValid = false;
+sample.handQuaternion = [1, 0, 0, 0];
+if fieldCount >= 13
     sample.calibrated = logical(values(4));
     sample.zeroCount = values(5);
     sample.upperQuaternion = values(6:9) ./ scale;
     sample.forearmQuaternion = values(10:13) ./ scale;
+    if fieldCount == 18
+        sample.handValid = logical(values(14));
+        sample.handQuaternion = values(15:18) ./ scale;
+    end
 else
     sample.calibrated = false;
     sample.zeroCount = 0;
@@ -310,39 +346,43 @@ eulerDegrees = [roll, pitch, yaw] .* (180 / pi);
 end
 
 function [figureHandle, plotState] = createPlotWindow
-figureHandle = figure('Name', 'HL04 Live Pose', 'NumberTitle', 'off', 'Color', 'w', ...
+figureHandle = figure('Name', 'Three-IMU Live Pose', 'NumberTitle', 'off', 'Color', 'w', ...
     'Position', [60, 80, 1500, 760]);
-layout = tiledlayout(figureHandle, 2, 3, 'TileSpacing', 'compact', 'Padding', 'compact');
+layout = tiledlayout(figureHandle, 3, 3, 'TileSpacing', 'compact', 'Padding', 'compact');
 
-poseAxes = nexttile(layout, 1, [2, 1]);
+poseAxes = nexttile(layout, 1, [3, 1]);
 hold(poseAxes, 'on');
 grid(poseAxes, 'on');
 axis(poseAxes, 'equal');
 view(poseAxes, 35, 24);
-xlim(poseAxes, [-1.2, 3.0]);
+xlim(poseAxes, [-1.2, 4.8]);
 ylim(poseAxes, [-1.3, 1.3]);
 zlim(poseAxes, [-1.3, 1.3]);
 xlabel(poseAxes, 'World X');
 ylabel(poseAxes, 'World Y');
 zlabel(poseAxes, 'World Z');
-title(poseAxes, 'Upper and Forearm Sensor Frames');
+title(poseAxes, 'Upper, Forearm, and Hand Sensor Frames');
 plot3(poseAxes, [-1, 1], [0, 0], [0, 0], ':', 'Color', [0.65, 0.65, 0.65]);
 plot3(poseAxes, [0, 0], [-1, 1], [0, 0], ':', 'Color', [0.65, 0.65, 0.65]);
 plot3(poseAxes, [0, 0], [0, 0], [-1, 1], ':', 'Color', [0.65, 0.65, 0.65]);
 text(poseAxes, 0, 0, -1.15, 'Upper', 'HorizontalAlignment', 'center');
 text(poseAxes, 1.8, 0, -1.15, 'Forearm', 'HorizontalAlignment', 'center');
+text(poseAxes, 3.6, 0, -1.15, 'Hand', 'HorizontalAlignment', 'center');
 plotState.upperFrame = createFrame(poseAxes);
 plotState.forearmFrame = createFrame(poseAxes);
+plotState.handFrame = createFrame(poseAxes);
 
 [plotState.upperEulerAxes, plotState.upperRollLine, plotState.upperPitchLine, plotState.upperYawLine] = ...
     createEulerPlot(layout, 2, 'Upper IMU ZYX Euler Angles');
 [plotState.forearmEulerAxes, plotState.forearmRollLine, plotState.forearmPitchLine, plotState.forearmYawLine] = ...
     createEulerPlot(layout, 5, 'Forearm IMU ZYX Euler Angles');
+[plotState.handEulerAxes, plotState.handRollLine, plotState.handPitchLine, plotState.handYawLine] = ...
+    createEulerPlot(layout, 8, 'Hand BMI088 ZYX Euler Angles');
 
-statusAxes = nexttile(layout, 3, [2, 1]);
+statusAxes = nexttile(layout, 3, [3, 1]);
 axis(statusAxes, 'off');
 plotState.statusText = text(statusAxes, 0.02, 0.96, 'Waiting for ARMPOSE data...', ...
-    'Units', 'normalized', 'VerticalAlignment', 'top', 'FontName', 'Consolas', 'FontSize', 10);
+    'Units', 'normalized', 'VerticalAlignment', 'top', 'FontName', 'Consolas', 'FontSize', 9);
 end
 
 function [axesHandle, rollLine, pitchLine, yawLine] = createEulerPlot(layout, tileIndex, titleText)

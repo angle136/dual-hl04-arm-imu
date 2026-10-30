@@ -1,30 +1,32 @@
 # Dual HL04 Arm IMU
 
-STM32F407 + ThreadX 双 HL04 姿态采集与机械臂位姿解算工程。仓库包含完整可配置固件环境、`arm_imu` APP，以及配套 MATLAB/J-Link RTT 可视化工具。
+STM32F407 + ThreadX 三 IMU 三段手臂姿态采集与机械臂位姿解算工程。姿态源包括两只 HL04 和手背主控板内置 BMI088。仓库包含完整可配置固件环境、`arm_imu` APP，以及配套 MATLAB/J-Link RTT 可视化工具。
 
 ## 当前硬件配置
 
 - 控制器：DJI C 型开发板，STM32F407IG；
 - 大臂 HL04：USART1，`921600 baud`；
 - 前臂 HL04：CAN2，`500 kbit/s`；
+- 手背姿态：主控板内置 BMI088，经 INS EKF 输出 `w,x,y,z` 四元数；
 - CAN 协议：CANopen 标准帧，节点 8，TPDO4 四元数 ID `0x488`；
+- 三段长度：大臂 `0.204 m`、前臂 `0.120 m`、腕部到手部目标点 `0.090 m`；
 - 手动标零：板载 KEY（PA0）；
 - J-Link RTT Channel 0：`ARMPOSE` 文本姿态；
 - J-Link RTT Channel 1：兼容机械臂板间协议的 36 字节六轴逆解帧。
 
-本 APP 不初始化或控制电机。两只 HL04 的原始数据、相对姿态、末端位置和六轴解析逆解均用于观测、调试和后续集成。
+本 APP 不初始化或控制电机。两只 HL04 与 BMI088 的姿态、三段位置链和六轴解析逆解均用于观测、调试和后续集成。
 
 ## 目录
 
 ```text
-apps/arm_imu/                 双 HL04 APP 与参数
+apps/arm_imu/                 三 IMU 三段手臂 APP 与参数
 board/                        STM32 板级工程与 BSP
 modules/                      公共功能模块
 threadx/                      Azure RTOS ThreadX
 utils/                        日志、RTT 与通用工具
 cmake/                        公共构建脚本
-tools/matlab_arm_pose/        双 IMU 姿态与 RPY 曲线
-tools/matlab_imu_raw_pose/    三点两连杆原坐标视图
+tools/matlab_arm_pose/        三 IMU 姿态与 RPY 曲线
+tools/matlab_imu_raw_pose/    四点三连杆原坐标视图
 ```
 
 ## 构建
@@ -46,6 +48,8 @@ cmake --build build/dji_c/Debug -j
 - `tools/matlab_imu_raw_pose/start_imu_raw_pose.bat`
 
 两套工具只读取 RTT，不复位、暂停、烧写或修改目标芯片。
+
+`ARMPOSE` 文本协议在原双 HL04 字段尾部追加手背 BMI088 有效位和四元数；旧解析器仍可读取前 13 个字段，两套 MATLAB 工具可显示三 IMU。
 
 ## 来源与历史
 

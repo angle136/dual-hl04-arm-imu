@@ -1,5 +1,5 @@
 function arm_imu_raw_pose
-%ARM_IMU_RAW_POSE Display two HL04 poses from J-Link RTT Channel 0.
+%ARM_IMU_RAW_POSE Display three IMU poses from J-Link RTT Channel 0.
 
 if ~ispc
     error('arm_imu_live_pose:WindowsOnly', ...
@@ -12,6 +12,7 @@ settings.speedKHz = 4000;
 settings.poseScale = 1000000;
 settings.upperLinkLength = 0.204;
 settings.forearmLinkLength = 0.120;
+settings.handLinkLength = 0.090;
 settings.noPoseTimeoutSeconds = 15;
 
 assertProbeIsFree();
@@ -60,7 +61,8 @@ try
     end
 
     [figureHandle, scene] = createPoseScene( ...
-        settings.upperLinkLength, settings.forearmLinkLength);
+        settings.upperLinkLength, settings.forearmLinkLength, ...
+        settings.handLinkLength);
     setappdata(figureHandle, 'StopRequested', false);
     set(figureHandle, 'CloseRequestFcn', ...
         @(source, ~) setappdata(source, 'StopRequested', true));
@@ -85,7 +87,8 @@ try
         if ~isempty(latestSample)
             receivedPose = true;
             updatePoseScene(scene, latestSample, ...
-                settings.upperLinkLength, settings.forearmLinkLength);
+                settings.upperLinkLength, settings.forearmLinkLength, ...
+                settings.handLinkLength);
             drawnow limitrate;
         else
             drawnow;
@@ -142,7 +145,11 @@ parts = regexp(strtrim(payload), ',', 'split');
 if numel(parts) < 13
     return;
 end
-values = str2double(parts(1:13));
+fieldCount = 13;
+if numel(parts) >= 18
+    fieldCount = 18;
+end
+values = str2double(parts(1:fieldCount));
 if any(~isfinite(values))
     return;
 end
@@ -154,6 +161,12 @@ sample.calibrated = logical(values(4));
 sample.zeroCount = values(5);
 sample.upperQuaternion = normalizeQuaternion(values(6:9) ./ scale);
 sample.forearmQuaternion = normalizeQuaternion(values(10:13) ./ scale);
+sample.handValid = false;
+sample.handQuaternion = [1, 0, 0, 0];
+if fieldCount == 18
+    sample.handValid = logical(values(14));
+    sample.handQuaternion = normalizeQuaternion(values(15:18) ./ scale);
+end
 end
 
 function quaternion = normalizeQuaternion(quaternion)
@@ -177,9 +190,10 @@ rotation = [
 ];
 end
 
-function [figureHandle, scene] = createPoseScene(upperLinkLength, forearmLinkLength)
+function [figureHandle, scene] = createPoseScene( ...
+        upperLinkLength, forearmLinkLength, handLinkLength)
 figureHandle = figure( ...
-    'Name', '双 HL04 原坐标姿态 - RTT Channel 0', ...
+    'Name', '三 IMU 原坐标姿态 - RTT Channel 0', ...
     'NumberTitle', 'off', ...
     'Color', [0.96, 0.97, 0.98], ...
     'Position', [120, 80, 1120, 780]);
@@ -195,7 +209,7 @@ ylabel(axesHandle, 'Y / m');
 zlabel(axesHandle, 'Z / m');
 titleHandle = title(axesHandle, '等待 ARMPOSE ...');
 
-limit = upperLinkLength + forearmLinkLength + 0.08;
+limit = upperLinkLength + forearmLinkLength + handLinkLength + 0.08;
 xlim(axesHandle, [-limit, limit]);
 ylim(axesHandle, [-limit, limit]);
 zlim(axesHandle, [-limit, limit]);
@@ -215,22 +229,30 @@ scene.baseSphere = surf(axesHandle, scene.unitSphere{1}, scene.unitSphere{2}, ..
 scene.elbowSphere = surf(axesHandle, scene.unitSphere{1}, scene.unitSphere{2}, ...
     scene.unitSphere{3}, 'FaceColor', [0.10, 0.55, 0.72], ...
     'EdgeColor', 'none', 'FaceAlpha', 0.92, 'Visible', 'off');
-scene.endSphere = surf(axesHandle, scene.unitSphere{1}, scene.unitSphere{2}, ...
+scene.wristSphere = surf(axesHandle, scene.unitSphere{1}, scene.unitSphere{2}, ...
     scene.unitSphere{3}, 'FaceColor', [0.93, 0.62, 0.12], ...
+    'EdgeColor', 'none', 'FaceAlpha', 0.92, 'Visible', 'off');
+scene.handSphere = surf(axesHandle, scene.unitSphere{1}, scene.unitSphere{2}, ...
+    scene.unitSphere{3}, 'FaceColor', [0.70, 0.24, 0.58], ...
     'EdgeColor', 'none', 'FaceAlpha', 0.92, 'Visible', 'off');
 scene.upperLink = plot3(axesHandle, [0, 0], [0, 0], [0, 0], ...
     'Color', [0.20, 0.22, 0.25], 'LineWidth', 7, 'Visible', 'off');
 scene.forearmLink = plot3(axesHandle, [0, 0], [0, 0], [0, 0], ...
     'Color', [0.20, 0.22, 0.25], 'LineWidth', 7, 'Visible', 'off');
+scene.handLink = plot3(axesHandle, [0, 0], [0, 0], [0, 0], ...
+    'Color', [0.34, 0.25, 0.36], 'LineWidth', 7, 'Visible', 'off');
 
 scene.frameScale = 0.055;
 scene.upperFrame = createDynamicFrame(axesHandle);
 scene.forearmFrame = createDynamicFrame(axesHandle);
+scene.handFrame = createDynamicFrame(axesHandle);
 scene.baseLabel = text(axesHandle, 0, 0, 0.025, '基座 / 肩点', ...
     'HorizontalAlignment', 'center', 'FontWeight', 'bold');
 scene.elbowLabel = text(axesHandle, 0, 0, 0.025, '肘点 / 大臂 HL04', ...
     'HorizontalAlignment', 'center', 'FontWeight', 'bold', 'Visible', 'off');
-scene.endLabel = text(axesHandle, 0, 0, 0.025, '末端 / 前臂 HL04', ...
+scene.wristLabel = text(axesHandle, 0, 0, 0.025, '腕点 / 前臂 HL04', ...
+    'HorizontalAlignment', 'center', 'FontWeight', 'bold', 'Visible', 'off');
+scene.handLabel = text(axesHandle, 0, 0, 0.025, '手部目标点 / BMI088', ...
     'HorizontalAlignment', 'center', 'FontWeight', 'bold', 'Visible', 'off');
 scene.title = titleHandle;
 
@@ -244,13 +266,17 @@ drawnow;
 enable_arm_camera_controls(figureHandle, axesHandle, 5);
 end
 
-function updatePoseScene(scene, sample, upperLinkLength, forearmLinkLength)
+function updatePoseScene(scene, sample, ...
+        upperLinkLength, forearmLinkLength, handLinkLength)
 basePosition = [0, 0, 0];
 upperRotation = quaternionToRotation(sample.upperQuaternion);
 forearmRotation = quaternionToRotation(sample.forearmQuaternion);
+handRotation = quaternionToRotation(sample.handQuaternion);
 elbowPosition = (upperRotation * [upperLinkLength; 0; 0])';
-endPosition = elbowPosition + ...
+wristPosition = elbowPosition + ...
     (forearmRotation * [forearmLinkLength; 0; 0])';
+handPosition = wristPosition + ...
+    (handRotation * [handLinkLength; 0; 0])';
 
 setObjectVisible(scene.baseSphere, true);
 setObjectVisible(scene.baseLabel, true);
@@ -273,21 +299,40 @@ updateFrame(scene.upperFrame, elbowPosition, upperRotation, ...
 
 bothValid = sample.upperValid && sample.forearmValid;
 if bothValid
-    set(scene.forearmLink, 'XData', [elbowPosition(1), endPosition(1)], ...
-        'YData', [elbowPosition(2), endPosition(2)], ...
-        'ZData', [elbowPosition(3), endPosition(3)], 'Visible', 'on');
-    moveSphere(scene.endSphere, scene.unitSphere, endPosition);
-    set(scene.endSphere, 'Visible', 'on');
-    updateFrame(scene.forearmFrame, endPosition, forearmRotation, ...
+    set(scene.forearmLink, 'XData', [elbowPosition(1), wristPosition(1)], ...
+        'YData', [elbowPosition(2), wristPosition(2)], ...
+        'ZData', [elbowPosition(3), wristPosition(3)], 'Visible', 'on');
+    moveSphere(scene.wristSphere, scene.unitSphere, wristPosition);
+    set(scene.wristSphere, 'Visible', 'on');
+    updateFrame(scene.forearmFrame, wristPosition, forearmRotation, ...
         scene.frameScale, true);
-    set(scene.endLabel, 'Position', endPosition + [0, 0, 0.025], ...
+    set(scene.wristLabel, 'Position', wristPosition + [0, 0, 0.025], ...
         'Visible', 'on');
 else
     set(scene.forearmLink, 'Visible', 'off');
-    set(scene.endSphere, 'Visible', 'off');
-    updateFrame(scene.forearmFrame, endPosition, eye(3), ...
+    set(scene.wristSphere, 'Visible', 'off');
+    updateFrame(scene.forearmFrame, wristPosition, eye(3), ...
         scene.frameScale, false);
-    set(scene.endLabel, 'Visible', 'off');
+    set(scene.wristLabel, 'Visible', 'off');
+end
+
+allValid = bothValid && sample.handValid;
+if allValid
+    set(scene.handLink, 'XData', [wristPosition(1), handPosition(1)], ...
+        'YData', [wristPosition(2), handPosition(2)], ...
+        'ZData', [wristPosition(3), handPosition(3)], 'Visible', 'on');
+    moveSphere(scene.handSphere, scene.unitSphere, handPosition);
+    set(scene.handSphere, 'Visible', 'on');
+    updateFrame(scene.handFrame, handPosition, handRotation, ...
+        scene.frameScale, true);
+    set(scene.handLabel, 'Position', handPosition + [0, 0, 0.025], ...
+        'Visible', 'on');
+else
+    set(scene.handLink, 'Visible', 'off');
+    set(scene.handSphere, 'Visible', 'off');
+    updateFrame(scene.handFrame, handPosition, eye(3), ...
+        scene.frameScale, false);
+    set(scene.handLabel, 'Visible', 'off');
 end
 
 calibrationText = '未标零';
@@ -295,7 +340,7 @@ if sample.calibrated
     calibrationText = sprintf('已标零 #%d', round(sample.zeroCount));
 end
 scene.title.String = sprintf( ...
-    '双 HL04 原坐标姿态 | SEQ %d | %s', ...
+    '三 IMU 三段原坐标姿态 | SEQ %d | %s', ...
     round(sample.sequence), calibrationText);
 end
 

@@ -1,7 +1,7 @@
 #ifndef _ARM_LEGACY_IK_H_
 #define _ARM_LEGACY_IK_H_
 
-#include "arm_imu_types.h"
+#include "imu_types.h"
 
 /** YUAN 六轴近似逆解的跨周期连续角状态。 */
 typedef struct

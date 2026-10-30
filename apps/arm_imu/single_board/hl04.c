@@ -1,6 +1,6 @@
-#include "arm_hl04.h"
+#include "hl04.h"
 
-#include "arm_imu_math.h"
+#include "imu_math.h"
 #include "bsp_can.h"
 #include "bsp_def.h"
 #include "bsp_uart.h"
@@ -499,7 +499,7 @@ uint8_t arm_hl04_init(void)
  * @brief 读取并解析一批大臂 UART 字节，随后清空前臂 CAN2 接收 FIFO。
  * @param 无。
  * @retval 无。
- * @note 调用关系：由双 IMU 工作线程每轮调用；UART 读取保持原有超时时间。
+ * @note 调用关系：由三 IMU 工作线程每轮调用；UART 读取保持原有超时时间。
  */
 void arm_hl04_poll(void)
 {

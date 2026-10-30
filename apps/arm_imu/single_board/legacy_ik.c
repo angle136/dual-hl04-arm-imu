@@ -1,6 +1,6 @@
-#include "arm_legacy_ik.h"
+#include "legacy_ik.h"
 
-#include "arm_imu_math.h"
+#include "imu_math.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -8,8 +8,6 @@
 
 #define ARM_LEGACY_IK_PI                3.14159265358979323846f
 #define ARM_LEGACY_IK_TWO_PI            (2.0f * ARM_LEGACY_IK_PI)
-#define ARM_LEGACY_IK_UPPER_LENGTH_M    0.204f
-#define ARM_LEGACY_IK_FOREARM_LENGTH_M  0.120f
 #define ARM_LEGACY_IK_SINGULAR_EPSILON  1.0e-4f
 #define ARM_LEGACY_IK_REACH_TOLERANCE_M 1.0e-3f
 
@@ -59,8 +57,8 @@ uint8_t arm_legacy_ik_solve(Arm_Legacy_Ik_Context_t *context, const float positi
     const float z         = position[2];
     const float radius_sq = x * x + y * y + z * z;
     const float radius    = sqrtf(radius_sq);
-    const float reach_min = fabsf(ARM_LEGACY_IK_UPPER_LENGTH_M - ARM_LEGACY_IK_FOREARM_LENGTH_M);
-    const float reach_max = ARM_LEGACY_IK_UPPER_LENGTH_M + ARM_LEGACY_IK_FOREARM_LENGTH_M;
+    const float reach_min = fabsf(ARM_IMU_UPPER_LENGTH_M - ARM_IMU_FOREARM_LENGTH_M);
+    const float reach_max = ARM_IMU_UPPER_LENGTH_M + ARM_IMU_FOREARM_LENGTH_M;
 
     if (!isfinite(radius) || radius < (reach_min - ARM_LEGACY_IK_REACH_TOLERANCE_M) || radius > (reach_max + ARM_LEGACY_IK_REACH_TOLERANCE_M) ||
         radius < ARM_LEGACY_IK_SINGULAR_EPSILON)
@@ -68,12 +66,10 @@ uint8_t arm_legacy_ik_solve(Arm_Legacy_Ik_Context_t *context, const float positi
         return 0U;
     }
 
-    float shoulder_cos =
-        (ARM_LEGACY_IK_UPPER_LENGTH_M * ARM_LEGACY_IK_UPPER_LENGTH_M + radius_sq - ARM_LEGACY_IK_FOREARM_LENGTH_M * ARM_LEGACY_IK_FOREARM_LENGTH_M) /
-        (2.0f * ARM_LEGACY_IK_UPPER_LENGTH_M * radius);
-    float elbow_cos =
-        (ARM_LEGACY_IK_UPPER_LENGTH_M * ARM_LEGACY_IK_UPPER_LENGTH_M + ARM_LEGACY_IK_FOREARM_LENGTH_M * ARM_LEGACY_IK_FOREARM_LENGTH_M - radius_sq) /
-        (2.0f * ARM_LEGACY_IK_UPPER_LENGTH_M * ARM_LEGACY_IK_FOREARM_LENGTH_M);
+    float shoulder_cos = (ARM_IMU_UPPER_LENGTH_M * ARM_IMU_UPPER_LENGTH_M + radius_sq - ARM_IMU_FOREARM_LENGTH_M * ARM_IMU_FOREARM_LENGTH_M) /
+                         (2.0f * ARM_IMU_UPPER_LENGTH_M * radius);
+    float elbow_cos = (ARM_IMU_UPPER_LENGTH_M * ARM_IMU_UPPER_LENGTH_M + ARM_IMU_FOREARM_LENGTH_M * ARM_IMU_FOREARM_LENGTH_M - radius_sq) /
+                      (2.0f * ARM_IMU_UPPER_LENGTH_M * ARM_IMU_FOREARM_LENGTH_M);
 
     joint_target[0] = atan2f(y, x);
     joint_target[1] = acosf(arm_imu_math_clampf(shoulder_cos, -1.0f, 1.0f)) + atan2f(z, sqrtf(x * x + y * y)) - ARM_LEGACY_IK_PI / 2.0f;

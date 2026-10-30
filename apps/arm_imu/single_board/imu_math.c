@@ -1,4 +1,4 @@
-#include "arm_imu_math.h"
+#include "imu_math.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -78,7 +78,7 @@ void arm_imu_math_matrix_multiply(const float left[3][3], const float right[3][3
  * @param vector 输入三维向量。
  * @param output 输出变换后的三维向量，允许与 vector 重叠。
  * @retval 无。
- * @note 调用关系：由双 IMU 位姿解算将本地连杆向量转换到基坐标系。
+ * @note 调用关系：由三 IMU 位姿解算将本地连杆向量转换到基坐标系。
  */
 void arm_imu_math_matrix_vector(const float matrix[3][3], const float vector[3], float output[3])
 {
@@ -119,7 +119,7 @@ uint8_t arm_imu_math_normalize_quaternion(const float input[4], float output[4])
  * @param quaternion 输入单位四元数，顺序为 w、x、y、z。
  * @param rotation 输出 3x3 旋转矩阵。
  * @retval 无。
- * @note 调用关系：由双 IMU 周期计算在传感器数据有效时调用。
+ * @note 调用关系：由三 IMU 周期计算在传感器数据有效时调用。
  */
 void arm_imu_math_quaternion_to_rotation(const float quaternion[4], float rotation[3][3])
 {
