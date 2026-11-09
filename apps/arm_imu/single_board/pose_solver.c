@@ -19,7 +19,7 @@ void arm_pose_solver_init(Arm_Pose_Solver_t *solver)
     arm_imu_math_matrix_identity(solver->upper_zero_transpose);
     arm_imu_math_matrix_identity(solver->forearm_zero_transpose);
     arm_imu_math_matrix_identity(solver->hand_zero_transpose);
-    arm_legacy_ik_reset(&solver->legacy_ik);
+    arm_ik_reset(&solver->arm_ik);
 }
 
 /**
@@ -40,7 +40,9 @@ void arm_pose_solver_capture_zero(Arm_Pose_Solver_t *solver, const float upper_r
     arm_imu_math_matrix_transpose(hand_raw, solver->hand_zero_transpose);
     solver->calibrated = 1U;
     solver->zero_count++;
-    arm_legacy_ik_reset(&solver->legacy_ik);
+    solver->last_ik_tick       = 0U;
+    solver->ik_due_immediately = 1U;
+    arm_ik_reset(&solver->arm_ik);
 }
 
 /**
@@ -54,7 +56,7 @@ void arm_pose_solver_capture_zero(Arm_Pose_Solver_t *solver, const float upper_r
  * @note 调用关系：由 arm_dual_imu_calculate() 在三路 IMU 数据有效时调用。
  */
 uint8_t arm_pose_solver_solve(Arm_Pose_Solver_t *solver, const float upper_raw[3][3], const float forearm_raw[3][3], const float hand_raw[3][3],
-                              Arm_Dual_Imu_State_t *state)
+                              uint32_t now, Arm_Dual_Imu_State_t *state)
 {
     if (solver == NULL || upper_raw == NULL || forearm_raw == NULL || hand_raw == NULL || state == NULL || solver->calibrated == 0U) return 0U;
 
@@ -71,23 +73,38 @@ uint8_t arm_pose_solver_solve(Arm_Pose_Solver_t *solver, const float upper_raw[3
     arm_imu_math_matrix_vector(state->forearm_rotation, forearm_local, forearm_vector);
     arm_imu_math_matrix_vector(state->hand_rotation, hand_local, hand_vector);
 
-    /* ponytail: 保留 YUAN 版上臂 Z 镜像；闭环前应替换成实测的完整 3x3 外参。 */
-    state->elbow_position_m[2] = -state->elbow_position_m[2];
+    /* 两个肢段都由同型号 HL04 给出同一右手系姿态。旧版“大臂 HL04 +
+     * 前臂 BMI088”遗留的单段 Z 镜像不能继续使用，否则位置链不是刚体变换。 */
     for (uint8_t i = 0U; i < 3U; ++i)
     {
         state->wrist_position_m[i]  = state->elbow_position_m[i] + forearm_vector[i];
         state->target_position_m[i] = state->wrist_position_m[i] + hand_vector[i];
     }
 
-    /* YUAN 版末端坐标变换，等价于绕 Y 轴旋转 -90 度。 */
-    static const float end_frame_map[3][3] = {
-        {0.0f, 0.0f, -1.0f},
-        {0.0f, 1.0f, 0.0f},
-        {1.0f, 0.0f, 0.0f},
-    };
-    arm_imu_math_matrix_multiply(end_frame_map, state->hand_rotation, state->target_rotation);
+    /* 前两路 IMU 控制 J1~J6：前臂相对旋转给出六轴末端方向。
+     * 固定左乘矩阵会在 IK 的 neutral^T * current 中完全抵消，真正的人体到
+     * 机器人基座变换统一由 arm_ik.c 处理。手背 BMI088 只生成 J7。 */
+    memcpy(state->target_rotation, state->forearm_rotation, sizeof(state->target_rotation));
     state->pose_valid = 1U;
-    /* 旧 IK 的两连杆几何求腕部中心；手长是腕后工具偏置，不计入 L1/L2 可达性。 */
-    state->ik_valid = arm_legacy_ik_solve(&solver->legacy_ik, state->wrist_position_m, state->target_rotation, state->legacy_joint_target_rad);
+
+    /* 姿态和三段位置每轮更新；计算量较大的数值 IK 只按固定周期运行。 */
+    if (solver->ik_due_immediately == 0U && (uint32_t)(now - solver->last_ik_tick) < ARM_DUAL_IMU_IK_PERIOD_MS) return 1U;
+    solver->last_ik_tick       = now;
+    solver->ik_due_immediately = 0U;
+
+    /* 前六轴按 URDF 链求解腕部中心；手长向量保留用于目标点和姿态观测。 */
+    state->ik_valid = arm_ik_solve_protocol(&solver->arm_ik, state->wrist_position_m, state->target_rotation, state->hand_rotation,
+                                            state->protocol_joint_target_rad, state->raw_joint_target_rad, &state->wrist_pitch_rad);
+    state->ik_position_error_m   = solver->arm_ik.last_position_error_m;
+    state->ik_rotation_error_rad = solver->arm_ik.last_rotation_error_rad;
+    state->ik_position_scale     = solver->arm_ik.position_scale;
+    memcpy(state->robot_target_position_m, solver->arm_ik.robot_target_position, sizeof(state->robot_target_position_m));
+    state->ik_iterations         = solver->arm_ik.last_iterations;
+    state->ik_attempt            = solver->arm_ik.last_attempt;
+    state->protocol_valid        = solver->arm_ik.have_previous_protocol_target;
+    if (state->ik_valid != 0U)
+    {
+        memcpy(state->legacy_joint_target_rad, state->protocol_joint_target_rad, sizeof(state->legacy_joint_target_rad));
+    }
     return 1U;
 }

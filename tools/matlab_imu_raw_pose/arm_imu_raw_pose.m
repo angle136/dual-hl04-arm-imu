@@ -14,6 +14,7 @@ settings.upperLinkLength = 0.204;
 settings.forearmLinkLength = 0.120;
 settings.handLinkLength = 0.090;
 settings.noPoseTimeoutSeconds = 15;
+settings.poseStaleTimeoutSeconds = 2;
 
 assertProbeIsFree();
 loggerExe = findRttLogger();
@@ -69,6 +70,8 @@ try
 
     receivedPose = false;
     waitForPoseClock = tic;
+    lastPoseClock = tic;
+    poseStale = false;
     lineBuffer = '';
 
     while isgraphics(figureHandle) && ...
@@ -86,11 +89,24 @@ try
         [latestSample, lineBuffer] = parseLatestPose(lineBuffer, settings.poseScale);
         if ~isempty(latestSample)
             receivedPose = true;
+            lastPoseClock = tic;
+            poseStale = false;
             updatePoseScene(scene, latestSample, ...
                 settings.upperLinkLength, settings.forearmLinkLength, ...
                 settings.handLinkLength);
             drawnow limitrate;
         else
+            if receivedPose && ~poseStale && ...
+                    toc(lastPoseClock) > settings.poseStaleTimeoutSeconds
+                poseStale = true;
+                scene.title.String = sprintf( ...
+                    'ARMPOSE 已停止超过 %.1f s | 保留最后姿态', ...
+                    settings.poseStaleTimeoutSeconds);
+                scene.title.Color = [0.82, 0.10, 0.10];
+                warning('arm_imu_live_pose:PoseStale', ...
+                    ['RTT Logger 仍在运行，但 ARMPOSE 已停止。' ...
+                     '板子可能进入 HardFault，或 RTT 数据源已经中断。']);
+            end
             drawnow;
             pause(0.01);
         end
@@ -375,6 +391,7 @@ end
 scene.title.String = sprintf( ...
     '三 IMU 三段原坐标姿态 | SEQ %d | %s', ...
     round(sample.sequence), calibrationText);
+scene.title.Color = [0.0, 0.0, 0.0];
 end
 
 function frameLines = createDynamicFrame(parentAxes)

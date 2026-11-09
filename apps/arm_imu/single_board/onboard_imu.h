@@ -11,9 +11,15 @@ typedef struct
     uint32_t update_count;
     uint32_t ins_dwt_count;
     uint8_t  frame_valid;
-    uint8_t  reserved[3];
+    uint8_t  stationary;
+    uint8_t  reserved[2];
     float    quaternion[4];
     float    euler_rad[3];
+    float    gyro_input_rad_s[3];
+    float    gyro_corrected_rad_s[3];
+    float    gyro_bias_online_rad_s[3];
+    float    temperature_c;
+    float    stationary_time_s;
 } Arm_Onboard_Imu_Data_t;
 
 /** Ozone 观察变量：手背 BMI088 经 INS 融合后的最新姿态。 */

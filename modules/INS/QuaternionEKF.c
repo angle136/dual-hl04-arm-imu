@@ -165,15 +165,10 @@ void IMU_QuaternionEKF_Update(float gx, float gy, float gz, float ax, float ay, 
         1.0f / invSqrt(QEKF_INS.Gyro[0] * QEKF_INS.Gyro[0] + QEKF_INS.Gyro[1] * QEKF_INS.Gyro[1] + QEKF_INS.Gyro[2] * QEKF_INS.Gyro[2]);
     QEKF_INS.accl_norm = 1.0f / accelInvNorm;
 
-    // 如果角速度小于阈值且加速度处于设定范围内,认为运动稳定,加速度可以用于修正角速度
-    // 稍后在最后的姿态更新部分会利用StableFlag来确定
-    const float acc_norm_gate  = 0.2f;  // m/s^2, 加速度模长门限(越小越严格)
-    const float horiz_acc_gate = 0.15f; // m/s^2, 水平(XY)加速度门限(抑制摩擦轮等振动/线加速度误触发)
-    float       horiz_acc      = 0.0f;
-    arm_sqrt_f32(QEKF_INS.Accel[0] * QEKF_INS.Accel[0] + QEKF_INS.Accel[1] * QEKF_INS.Accel[1], &horiz_acc);
-
-    if (QEKF_INS.gyro_norm < 0.3f && QEKF_INS.accl_norm > 9.8f - acc_norm_gate && QEKF_INS.accl_norm < 9.8f + acc_norm_gate &&
-        horiz_acc < horiz_acc_gate)
+    // 静止判定只使用角速度和加速度模长，不能假设传感器自身 Z 轴竖直。
+    // StableFlag 用于残差持续异常时解除“仅预测”状态，让重力观测重新拉回 roll/pitch。
+    const float acc_norm_gate = 0.25f;
+    if (QEKF_INS.gyro_norm < 0.15f && QEKF_INS.accl_norm > 9.81f - acc_norm_gate && QEKF_INS.accl_norm < 9.81f + acc_norm_gate)
     {
         QEKF_INS.StableFlag = 1;
     }

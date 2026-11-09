@@ -57,6 +57,12 @@ void arm_onboard_imu_poll(void)
     Arm_Onboard_Imu_Data_t data = {0};
     memcpy(data.quaternion, ins->q, sizeof(data.quaternion));
     memcpy(data.euler_rad, ins->euler_rad, sizeof(data.euler_rad));
+    memcpy(data.gyro_input_rad_s, ins->gyro_input_rad_s, sizeof(data.gyro_input_rad_s));
+    memcpy(data.gyro_corrected_rad_s, ins->gyro_corrected_rad_s, sizeof(data.gyro_corrected_rad_s));
+    memcpy(data.gyro_bias_online_rad_s, ins->gyro_bias_online_rad_s, sizeof(data.gyro_bias_online_rad_s));
+    data.temperature_c     = ins->temperature_c;
+    data.stationary_time_s = ins->stationary_time_s;
+    data.stationary        = ins->stationary;
     __DMB();
     uint32_t dwt_count_after = ins->dwt_cnt;
     if (dwt_count_before != dwt_count_after) return;

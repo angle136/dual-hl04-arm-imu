@@ -29,6 +29,8 @@ typedef enum
     UART_MODE_DMA
 } UART_Mode;
 
+#define BSP_UART_DIAG_RECENT_BYTE_COUNT 16U
+
 // 初始化配置结构体
 typedef struct
 {
@@ -40,12 +42,57 @@ typedef struct
     UART_Mode tx_mode;         // 发送模式
 } UART_Device_init_config;
 
+typedef struct
+{
+    uint32_t rx_event_count;
+    uint32_t dma_bytes_received;
+    uint32_t fifo_bytes_enqueued;
+    uint32_t fifo_bytes_read;
+    uint32_t fifo_bytes_dropped;
+    uint32_t fifo_bytes_discarded_on_restart;
+    uint32_t fifo_depth;
+    uint32_t uart_error_count;
+    uint32_t parity_error_count;
+    uint32_t noise_error_count;
+    uint32_t frame_error_count;
+    uint32_t overrun_error_count;
+    uint32_t dma_error_count;
+    uint32_t dma_start_count;
+    uint32_t rx_start_failure_count;
+    uint32_t last_error_code;
+    uint32_t dma_remaining;
+    uint32_t dma_position;
+    uint32_t dma_buffer_size;
+    uint8_t  uart_rx_state;
+    uint8_t  dma_state;
+    uint8_t  rx_active;
+    uint8_t  dma_active;
+    uint8_t  recent_byte_count;
+    uint8_t  recent_bytes[BSP_UART_DIAG_RECENT_BYTE_COUNT];
+} BSP_UART_Diagnostics_t;
+
 /**
  * @brief UART初始化
  * @param config 初始化配置
  * @return UART_Device* 成功返回设备指针，失败返回NULL
  */
 UART_Device *BSP_UART_Device_Init(UART_Device_init_config *config);
+
+/**
+ * @brief 清理 UART 接收状态并重新启动 DMA 接收。
+ * @param device 已初始化且使用 DMA 接收的 UART 设备。
+ * @return 0 表示成功，-1 表示参数、模式或 HAL 操作失败。
+ * @note 仅重启主控侧接收，不会向外部设备发送任何数据。
+ */
+int BSP_UART_Rearm_DMA(UART_Device *device);
+
+/**
+ * @brief 获取 UART DMA 接收计数和当前接收状态。
+ * @param device 已初始化的 UART 设备。
+ * @param diagnostics 输出诊断快照。
+ * @return 0 表示成功，-1 表示参数或设备无效。
+ */
+int BSP_UART_GetDiagnostics(UART_Device *device, BSP_UART_Diagnostics_t *diagnostics);
 
 /**
  * @brief UART发送（阻塞至DMA完成或超时）

@@ -91,6 +91,8 @@ static void arm_dual_imu_update_zero(Arm_Dual_Imu_Context_t *context, ULONG now,
         if (context->zero_requested != 0U)
         {
             arm_pose_solver_capture_zero(&context->pose_solver, upper_raw, forearm_raw, hand_raw);
+            state->ik_valid       = 0U;
+            state->protocol_valid = 0U;
             context->zero_requested = 0U;
             LOG_I("three-IMU neutral pose captured, count=%lu", (unsigned long)context->pose_solver.zero_count);
         }
@@ -159,14 +161,15 @@ static void arm_dual_imu_calculate(Arm_Dual_Imu_Context_t *context)
     state->calibrated = context->pose_solver.calibrated;
     state->zero_count = context->pose_solver.zero_count;
     state->pose_valid = 0U;
-    state->ik_valid   = 0U;
     if (state->upper_imu_valid == 0U || state->forearm_imu_valid == 0U || state->hand_imu_valid == 0U || context->pose_solver.calibrated == 0U)
     {
+        state->ik_valid       = 0U;
+        state->protocol_valid = 0U;
         arm_dual_imu_publish(state);
         return;
     }
 
-    (void)arm_pose_solver_solve(&context->pose_solver, upper_raw, forearm_raw, hand_raw, state);
+    (void)arm_pose_solver_solve(&context->pose_solver, upper_raw, forearm_raw, hand_raw, (uint32_t)now, state);
     arm_dual_imu_publish(state);
 }
 
@@ -185,6 +188,7 @@ static void arm_dual_imu_task_entry(ULONG thread_input)
         arm_hl04_poll();
         arm_onboard_imu_poll();
         arm_dual_imu_calculate(&g_arm_dual_imu_context);
+        tx_thread_sleep(1U);
     }
 }
 

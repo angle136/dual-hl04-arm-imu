@@ -25,7 +25,7 @@
 typedef struct
 {
     float   AccelScale;    /* 加速度计缩放因子 */
-    float   GyroOffset[3]; /* 陀螺仪零偏 (dps) */
+    float   GyroOffset[3]; /* 陀螺仪零偏 (rad/s) */
     float   gNorm;         /* 重力模长 (标定获取) */
     float   TempWhenCali;  /* 标定时温度 */
     uint8_t Calibrated;    /* 标定完成标志 */
@@ -39,7 +39,7 @@ typedef struct
     PWM_Device          *bmi088_pwm;
     PIDInstance          pid_temp;
     float                acc[3];      /* 加速度 (m/s²) */
-    float                gyro[3];     /* 角速度 (dps) */
+    float                gyro[3];     /* 角速度 (rad/s) */
     float                temperature; /* 温度 (℃) */
     BMI088_Cali_Offset_t BMI088_Cali_Offset;
     BMI088_ERORR_CODE_e  BMI088_ERORR_CODE;

@@ -29,6 +29,24 @@ typedef struct UART_Device
     uint8_t             *rx_buf;          // DMA / IT 硬件接收缓冲区指针
     uint32_t             buf_size;        // 硬件接收缓冲区大小
     volatile uint32_t    last_buf_pos;    // 上次 DMA 缓冲区处理位置（仅 DMA 模式）
+    volatile uint32_t    rx_event_count;
+    volatile uint32_t    dma_bytes_received;
+    volatile uint32_t    fifo_bytes_enqueued;
+    volatile uint32_t    fifo_bytes_read;
+    volatile uint32_t    fifo_bytes_dropped;
+    volatile uint32_t    fifo_bytes_discarded_on_restart;
+    volatile uint32_t    uart_error_count;
+    volatile uint32_t    parity_error_count;
+    volatile uint32_t    noise_error_count;
+    volatile uint32_t    frame_error_count;
+    volatile uint32_t    overrun_error_count;
+    volatile uint32_t    dma_error_count;
+    volatile uint32_t    dma_start_count;
+    volatile uint32_t    rx_start_failure_count;
+    volatile uint32_t    last_error_code;
+    volatile uint8_t     recent_byte_count;
+    volatile uint8_t     recent_byte_write_index;
+    volatile uint8_t     recent_bytes[BSP_UART_DIAG_RECENT_BYTE_COUNT];
     uint32_t             expected_rx_len; // 期望接收数据长度，0 = 不定长
     TX_EVENT_FLAGS_GROUP event_flags;     // 事件标志组 (RX / TX)
     UART_Mode            rx_mode;         // 接收模式
@@ -54,18 +72,107 @@ static int Find_Free_Slot(void)
     return -1;
 }
 
-static void start_rx_it(UART_Device *dev)
+static void record_recent_bytes(UART_Device *dev, const uint8_t *bytes, size_t length)
 {
-    uint16_t expect = dev->expected_rx_len > 0 ? (uint16_t)dev->expected_rx_len : (uint16_t)dev->buf_size;
-    HAL_UARTEx_ReceiveToIdle_IT(dev->huart, dev->rx_buf, expect);
+    for (size_t i = 0U; i < length; ++i)
+    {
+        dev->recent_bytes[dev->recent_byte_write_index] = bytes[i];
+        dev->recent_byte_write_index =
+            (uint8_t)((dev->recent_byte_write_index + 1U) % BSP_UART_DIAG_RECENT_BYTE_COUNT);
+        if (dev->recent_byte_count < BSP_UART_DIAG_RECENT_BYTE_COUNT) dev->recent_byte_count++;
+    }
 }
 
-static void start_rx_dma(UART_Device *dev)
+static void discard_pending_fifo(UART_Device *dev)
 {
-    dev->last_buf_pos = 0;
-    dev->rx_fifo.in   = 0;
-    dev->rx_fifo.out  = 0;
-    HAL_UARTEx_ReceiveToIdle_DMA(dev->huart, dev->rx_buf, (uint16_t)dev->buf_size);
+    uint32_t pending = kfifo_len(&dev->rx_fifo);
+    if (pending > dev->buf_size) pending = dev->buf_size;
+    dev->fifo_bytes_discarded_on_restart += pending;
+    dev->last_buf_pos = 0U;
+    dev->rx_fifo.in   = 0U;
+    dev->rx_fifo.out  = 0U;
+}
+
+static HAL_StatusTypeDef start_rx_it(UART_Device *dev)
+{
+    uint16_t expect = dev->expected_rx_len > 0 ? (uint16_t)dev->expected_rx_len : (uint16_t)dev->buf_size;
+    HAL_StatusTypeDef status = HAL_UARTEx_ReceiveToIdle_IT(dev->huart, dev->rx_buf, expect);
+    if (status != HAL_OK) dev->rx_start_failure_count++;
+    return status;
+}
+
+static HAL_StatusTypeDef start_rx_dma(UART_Device *dev)
+{
+    discard_pending_fifo(dev);
+    HAL_StatusTypeDef status = HAL_UARTEx_ReceiveToIdle_DMA(dev->huart, dev->rx_buf, (uint16_t)dev->buf_size);
+    if (status != HAL_OK) dev->rx_start_failure_count++;
+    else dev->dma_start_count++;
+    return status;
+}
+
+int BSP_UART_Rearm_DMA(UART_Device *device)
+{
+    if (device == NULL || device->initialed == 0U || device->rx_mode != UART_MODE_DMA) return -1;
+
+    if (HAL_UART_AbortReceive(device->huart) != HAL_OK) return -1;
+
+    /* 清除传感器在主控接收器尚未启动期间留下的 UART 状态位。 */
+    __HAL_UART_CLEAR_OREFLAG(device->huart);
+    __HAL_UART_CLEAR_IDLEFLAG(device->huart);
+
+    discard_pending_fifo(device);
+    if (HAL_UARTEx_ReceiveToIdle_DMA(device->huart, device->rx_buf, (uint16_t)device->buf_size) != HAL_OK)
+    {
+        device->rx_start_failure_count++;
+        return -1;
+    }
+    device->dma_start_count++;
+
+    return 0;
+}
+
+int BSP_UART_GetDiagnostics(UART_Device *device, BSP_UART_Diagnostics_t *diagnostics)
+{
+    if (device == NULL || diagnostics == NULL || device->initialed == 0U) return -1;
+
+    diagnostics->rx_event_count        = device->rx_event_count;
+    diagnostics->dma_bytes_received    = device->dma_bytes_received;
+    diagnostics->fifo_bytes_enqueued   = device->fifo_bytes_enqueued;
+    diagnostics->fifo_bytes_read       = device->fifo_bytes_read;
+    diagnostics->fifo_bytes_dropped    = device->fifo_bytes_dropped;
+    diagnostics->fifo_bytes_discarded_on_restart = device->fifo_bytes_discarded_on_restart;
+    diagnostics->fifo_depth            = kfifo_len(&device->rx_fifo);
+    if (diagnostics->fifo_depth > device->buf_size) diagnostics->fifo_depth = device->buf_size;
+    diagnostics->uart_error_count      = device->uart_error_count;
+    diagnostics->parity_error_count    = device->parity_error_count;
+    diagnostics->noise_error_count     = device->noise_error_count;
+    diagnostics->frame_error_count     = device->frame_error_count;
+    diagnostics->overrun_error_count   = device->overrun_error_count;
+    diagnostics->dma_error_count       = device->dma_error_count;
+    diagnostics->dma_start_count       = device->dma_start_count;
+    diagnostics->rx_start_failure_count = device->rx_start_failure_count;
+    diagnostics->last_error_code       = device->last_error_code;
+    diagnostics->uart_rx_state         = (uint8_t)device->huart->RxState;
+    diagnostics->dma_state             = (device->huart->hdmarx != NULL) ? (uint8_t)device->huart->hdmarx->State : 0xFFU;
+    diagnostics->dma_remaining         = (device->huart->hdmarx != NULL) ? __HAL_DMA_GET_COUNTER(device->huart->hdmarx) : 0U;
+    diagnostics->dma_buffer_size        = device->buf_size;
+    diagnostics->dma_position           = (diagnostics->dma_buffer_size >= diagnostics->dma_remaining)
+                                             ? diagnostics->dma_buffer_size - diagnostics->dma_remaining
+                                             : 0U;
+    diagnostics->rx_active              = (device->huart->RxState == HAL_UART_STATE_BUSY_RX) ? 1U : 0U;
+    diagnostics->dma_active             = (device->huart->hdmarx != NULL && device->huart->hdmarx->State == HAL_DMA_STATE_BUSY) ? 1U : 0U;
+    diagnostics->recent_byte_count = device->recent_byte_count;
+    uint8_t recent_start = (uint8_t)((device->recent_byte_write_index + BSP_UART_DIAG_RECENT_BYTE_COUNT -
+                                      diagnostics->recent_byte_count) % BSP_UART_DIAG_RECENT_BYTE_COUNT);
+    for (uint8_t i = 0U; i < diagnostics->recent_byte_count; ++i)
+    {
+        diagnostics->recent_bytes[i] = device->recent_bytes[(recent_start + i) % BSP_UART_DIAG_RECENT_BYTE_COUNT];
+    }
+    for (uint8_t i = diagnostics->recent_byte_count; i < BSP_UART_DIAG_RECENT_BYTE_COUNT; ++i)
+    {
+        diagnostics->recent_bytes[i] = 0U;
+    }
+    return 0;
 }
 
 /* 对外函数 */
@@ -228,6 +335,7 @@ int BSP_UART_Read(UART_Device *device, uint8_t *buf, uint32_t buf_size, uint32_t
     uint32_t avail   = kfifo_len(&device->rx_fifo);
     uint32_t to_read = (avail <= buf_size) ? avail : buf_size;
     uint32_t actual  = kfifo_out(&device->rx_fifo, buf, to_read);
+    device->fifo_bytes_read += actual;
     if (rx_len) *rx_len = actual;
     return (int)actual;
 }
@@ -253,8 +361,12 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         /* IT 模式：HAL 每次从 rx_buf[0] 开始写，直接重置 kfifo 索引 */
         if (Size > 0)
         {
+            dev->rx_event_count++;
+            dev->dma_bytes_received += Size;
             dev->rx_fifo.in  = Size;
             dev->rx_fifo.out = 0;
+            dev->fifo_bytes_enqueued += Size;
+            record_recent_bytes(dev, dev->rx_buf, Size);
             __DMB();
             tx_event_flags_set(&dev->event_flags, BSP_UART_EVENT_RX, TX_OR);
         }
@@ -262,6 +374,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
     }
     else if (dev->rx_mode == UART_MODE_DMA)
     {
+        dev->rx_event_count++;
         /* DMA 模式：环形缓冲区，计算新增数据长度并更新写索引 */
         size_t dma_size = dev->buf_size;
         size_t ndtr     = __HAL_DMA_GET_COUNTER(huart->hdmarx);
@@ -284,6 +397,19 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 
         if (new_len > 0)
         {
+            const size_t received_len = new_len;
+            const size_t tail_len = (received_len < BSP_UART_DIAG_RECENT_BYTE_COUNT)
+                                        ? received_len
+                                        : BSP_UART_DIAG_RECENT_BYTE_COUNT;
+            dev->dma_bytes_received += (uint32_t)received_len;
+            uint8_t tail[BSP_UART_DIAG_RECENT_BYTE_COUNT];
+            for (size_t i = 0U; i < tail_len; ++i)
+            {
+                size_t dma_index = (curr_pos + dma_size - tail_len + i) % dma_size;
+                tail[i] = dev->rx_buf[dma_index];
+            }
+            record_recent_bytes(dev, tail, tail_len);
+
             /* 保护 kfifo 容量: in 不超过 out + mask + 1 (即 fifo 容量) */
             unsigned int fifo_cap = dev->rx_fifo.mask + 1;
             unsigned int max_in   = dev->rx_fifo.out + fifo_cap;
@@ -293,17 +419,31 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
             if (new_len > 0)
             {
                 dev->rx_fifo.in += new_len;
+                dev->fifo_bytes_enqueued += (uint32_t)new_len;
                 __DMB();
-                dev->last_buf_pos = curr_pos;
                 tx_event_flags_set(&dev->event_flags, BSP_UART_EVENT_RX, TX_OR);
             }
+            dev->fifo_bytes_dropped += (uint32_t)(received_len - new_len);
+            dev->last_buf_pos = curr_pos;
         }
     }
 }
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-    HAL_UART_Abort(huart); /* 同步 abort，消除异步竞态 */
     UART_Device *dev = Find_Device(huart);
+    if (dev != NULL)
+    {
+        uint32_t error = huart->ErrorCode;
+        dev->uart_error_count++;
+        dev->last_error_code = error;
+        if ((error & HAL_UART_ERROR_PE) != 0U) dev->parity_error_count++;
+        if ((error & HAL_UART_ERROR_NE) != 0U) dev->noise_error_count++;
+        if ((error & HAL_UART_ERROR_FE) != 0U) dev->frame_error_count++;
+        if ((error & HAL_UART_ERROR_ORE) != 0U) dev->overrun_error_count++;
+        if ((error & HAL_UART_ERROR_DMA) != 0U) dev->dma_error_count++;
+    }
+
+    HAL_UART_Abort(huart); /* 同步 abort，消除异步竞态 */
     if (!dev) return;
     if (dev->rx_mode == UART_MODE_IT)
     {

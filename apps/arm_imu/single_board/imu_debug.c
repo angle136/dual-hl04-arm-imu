@@ -27,9 +27,11 @@
 #define ARM_IMU_DEBUG_TASK_STACK_SIZE     2048U
 #define ARM_IMU_DEBUG_TASK_PRIORITY       20U
 #define ARM_IMU_DEBUG_FRAME_HEADER        0xAAU
-#define ARM_IMU_DEBUG_FRAME_PAYLOAD_SIZE  32U
-#define ARM_IMU_DEBUG_FRAME_SIZE          36U
+#define ARM_IMU_DEBUG_FRAME_PAYLOAD_SIZE  36U
+#define ARM_IMU_DEBUG_FRAME_SIZE          40U
 #define ARM_IMU_DEBUG_FRAME_TAIL          0xFFU
+#define ARM_IMU_DEBUG_STATUS_HOLD_CURRENT 0x01U
+#define ARM_IMU_DEBUG_STATUS_FULL_FOLLOW  0x02U
 
 static TX_THREAD                  g_arm_imu_debug_thread;
 APPS_STACK_SECTION static uint8_t g_arm_imu_debug_stack[ARM_IMU_DEBUG_TASK_STACK_SIZE];
@@ -40,11 +42,12 @@ static char                        g_arm_imu_debug_pose_line[256];
 static uint8_t g_arm_imu_debug_rtt_buffer[ARM_IMU_DEBUG_RTT_BUFFER_SIZE];
 static uint8_t g_arm_imu_debug_pose_rtt_buffer[ARM_IMU_DEBUG_RTT_BUFFER_SIZE];
 static uint8_t g_arm_imu_debug_frame[ARM_IMU_DEBUG_FRAME_SIZE];
-static float   g_arm_imu_debug_last_valid_joint[ARM_DUAL_IMU_IK_DOF];
+static float   g_arm_imu_debug_last_valid_joint[ARM_DUAL_IMU_PROTOCOL_DOF];
 static uint8_t g_arm_imu_debug_sequence;
 static uint8_t g_arm_imu_debug_rtt_ready;
 static uint8_t g_arm_imu_debug_pose_rtt_ready;
 static uint8_t g_arm_imu_debug_have_valid_joint;
+static uint32_t g_arm_imu_debug_joint_zero_count;
 #endif
 
 /**
@@ -146,8 +149,12 @@ static void arm_imu_debug_log_status(const Arm_Dual_Imu_State_t *state)
           (unsigned long)state->hand_update_count);
     LOG_I("wrist=[%.3f %.3f %.3f] hand=[%.3f %.3f %.3f]", state->wrist_position_m[0], state->wrist_position_m[1], state->wrist_position_m[2],
           state->target_position_m[0], state->target_position_m[1], state->target_position_m[2]);
-    LOG_I("ik=[%.3f %.3f %.3f %.3f %.3f %.3f]", state->legacy_joint_target_rad[0], state->legacy_joint_target_rad[1],
+    LOG_I("robot_j6_target=[%.3f %.3f %.3f]", state->robot_target_position_m[0], state->robot_target_position_m[1], state->robot_target_position_m[2]);
+    LOG_I("joint=[%.5f %.5f %.5f %.5f %.5f %.5f]", state->legacy_joint_target_rad[0], state->legacy_joint_target_rad[1],
           state->legacy_joint_target_rad[2], state->legacy_joint_target_rad[3], state->legacy_joint_target_rad[4], state->legacy_joint_target_rad[5]);
+    LOG_I("ikdiag valid=%u protocol=%u try=%u iter=%u pos=%.4f rot=%.4f scale=%.3f j7=%.5f", (unsigned)state->ik_valid,
+          (unsigned)state->protocol_valid, (unsigned)state->ik_attempt, (unsigned)state->ik_iterations, state->ik_position_error_m,
+          state->ik_rotation_error_rad, state->ik_position_scale, state->protocol_joint_target_rad[6]);
 }
 
 /**
@@ -209,29 +216,44 @@ static void arm_imu_debug_log_matlab_pose(const Arm_Dual_Imu_State_t *state)
 
 #if (ARM_IMU_DEBUG_RTT_ENABLE != 0)
 /**
- * @brief 通过 SEGGER RTT 发布兼容板间协议格式的六轴逆解帧。
+ * @brief 通过 SEGGER RTT 发布兼容板间协议格式的七轴协议角帧。
  * @param state 输入一致的三 IMU 状态快照。
  * @retval 无。
- * @note 调用关系：由调试线程在 RTT 启用时调用；逆解暂时无效时保持并发送最后一个有效关节目标。
+ * @note 调用关系：由调试线程在 RTT 启用时调用；逆解暂时无效时保持并发送最后一个有效协议角目标。
  */
 static void arm_imu_debug_stream_joint_frame(const Arm_Dual_Imu_State_t *state)
 {
     if (g_arm_imu_debug_rtt_ready == 0U) return;
 
+    const uint8_t all_imu_online = (state->upper_imu_valid != 0U && state->forearm_imu_valid != 0U && state->hand_imu_valid != 0U) ? 1U : 0U;
+    if (g_arm_imu_debug_joint_zero_count != state->zero_count)
+    {
+        g_arm_imu_debug_joint_zero_count = state->zero_count;
+        g_arm_imu_debug_have_valid_joint = 0U;
+    }
+
     if (state->ik_valid != 0U)
     {
-        memcpy(g_arm_imu_debug_last_valid_joint, state->legacy_joint_target_rad, sizeof(g_arm_imu_debug_last_valid_joint));
+        memcpy(g_arm_imu_debug_last_valid_joint, state->protocol_joint_target_rad, sizeof(float) * ARM_DUAL_IMU_IK_DOF);
         g_arm_imu_debug_have_valid_joint = 1U;
     }
-    if (state->calibrated == 0U || g_arm_imu_debug_have_valid_joint == 0U) return;
+    if (state->hand_imu_valid != 0U && state->calibrated != 0U)
+        g_arm_imu_debug_last_valid_joint[6] = state->protocol_joint_target_rad[6];
+    /* 在线但尚未标零或尚无可达解时，不发默认零角；掉线时始终发送保持位。 */
+    if (all_imu_online != 0U && (state->calibrated == 0U || g_arm_imu_debug_have_valid_joint == 0U)) return;
 
     float payload[8] = {0.0f};
-    memcpy(payload, g_arm_imu_debug_last_valid_joint, sizeof(g_arm_imu_debug_last_valid_joint));
+    if (g_arm_imu_debug_have_valid_joint != 0U)
+        memcpy(payload, g_arm_imu_debug_last_valid_joint, sizeof(g_arm_imu_debug_last_valid_joint));
 
     g_arm_imu_debug_frame[0] = ARM_IMU_DEBUG_FRAME_HEADER;
     g_arm_imu_debug_frame[1] = ARM_IMU_DEBUG_FRAME_PAYLOAD_SIZE;
     g_arm_imu_debug_frame[2] = g_arm_imu_debug_sequence++;
     memcpy(&g_arm_imu_debug_frame[3], payload, sizeof(payload));
+    const uint8_t follow_valid =
+        (all_imu_online != 0U && state->calibrated != 0U && g_arm_imu_debug_have_valid_joint != 0U) ? 1U : 0U;
+    const uint32_t status = follow_valid != 0U ? ARM_IMU_DEBUG_STATUS_FULL_FOLLOW : ARM_IMU_DEBUG_STATUS_HOLD_CURRENT;
+    memcpy(&g_arm_imu_debug_frame[3U + sizeof(payload)], &status, sizeof(status));
     g_arm_imu_debug_frame[ARM_IMU_DEBUG_FRAME_SIZE - 1U] = ARM_IMU_DEBUG_FRAME_TAIL;
 
     (void)SEGGER_RTT_Write(ARM_IMU_DEBUG_RTT_CHANNEL, g_arm_imu_debug_frame, sizeof(g_arm_imu_debug_frame));

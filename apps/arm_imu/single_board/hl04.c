@@ -51,6 +51,17 @@ typedef struct
     Arm_Hl04_Parser_t parser;
     volatile uint32_t forearm_packet_count;
     volatile uint32_t forearm_frame_error_count;
+    ULONG             uart_start_tick;
+    ULONG             uart_diag_log_tick;
+    uint32_t          uart_diag_prev_dma_position;
+    uint32_t          uart_diag_prev_rx_event_count;
+    uint32_t          uart_diag_prev_bytes_received;
+    uint32_t          uart_diag_prev_bytes_read;
+    uint32_t          uart_diag_prev_error_count;
+    uint32_t          uart_current_baud;
+    uint8_t           uart_recovery_attempted;
+    uint8_t           uart_data_detected_logged;
+    uint8_t           uart_diag_have_dma_position;
 } Arm_Hl04_Context_t;
 
 BUFFER_SECTION static uint8_t g_arm_hl04_uart_buffer[ARM_HL04_UART_BUFFER_SIZE];
@@ -157,6 +168,26 @@ static void arm_hl04_parser_reset(Arm_Hl04_Parser_t *parser)
     parser->index           = 0U;
     parser->payload_length  = 0U;
     parser->expected_length = 0U;
+}
+
+/**
+ * @brief 仅重配主控 USART 波特率并重新启动 DMA，用于兼容未保存高速配置的 HI04。
+ * @param baud_rate 目标波特率。
+ * @return 1 表示重配成功，0 表示 HAL 或 DMA 重启失败。
+ * @note 不向传感器发送指令，也不修改传感器 Flash。
+ */
+static uint8_t arm_hl04_uart_set_baud(uint32_t baud_rate)
+{
+    if (HAL_UART_AbortReceive(&ARM_DUAL_IMU_UART) != HAL_OK) return 0U;
+
+    ARM_DUAL_IMU_UART.Init.BaudRate = baud_rate;
+    if (HAL_UART_Init(&ARM_DUAL_IMU_UART) != HAL_OK) return 0U;
+
+    arm_hl04_parser_reset(&g_arm_hl04_context.parser);
+    if (BSP_UART_Rearm_DMA(g_arm_hl04_context.uart) != 0) return 0U;
+
+    g_arm_hl04_context.uart_current_baud = baud_rate;
+    return 1U;
 }
 
 /**
@@ -487,6 +518,15 @@ uint8_t arm_hl04_init(void)
         return 0U;
     }
 
+    /* HL04 可能在主控进入 APP 前已经输出，先丢弃半帧并从干净状态重新接收。 */
+    if (BSP_UART_Rearm_DMA(g_arm_hl04_context.uart) != 0)
+    {
+        LOG_E("HL04 UART DMA start failed");
+        return 0U;
+    }
+    g_arm_hl04_context.uart_start_tick = tx_time_get();
+    g_arm_hl04_context.uart_current_baud = ARM_DUAL_IMU_UART_BAUD;
+
     if (arm_hl04_can_init() == 0U)
     {
         LOG_E("forearm HL04 CAN2 init failed: rx_id=0x%08lX", (unsigned long)ARM_DUAL_IMU_CAN_RX_ID);
@@ -514,5 +554,105 @@ void arm_hl04_poll(void)
             if (arm_hl04_parser_feed(&g_arm_hl04_context.parser, read_buffer[i], &data) != 0U) arm_hl04_uart_publish(&data);
         }
     }
+
+    ULONG now = tx_time_get();
+    if (g_arm_hl04_context.uart_data_detected_logged == 0U && (now - g_arm_hl04_context.uart_diag_log_tick) >= TX_TIMER_TICKS_PER_SECOND)
+    {
+        BSP_UART_Diagnostics_t diag;
+        g_arm_hl04_context.uart_diag_log_tick = now;
+        if (BSP_UART_GetDiagnostics(g_arm_hl04_context.uart, &diag) == 0)
+        {
+            const char *classification = "NO_RX_ACTIVITY_OBSERVED";
+            uint32_t new_rx_events = diag.rx_event_count - g_arm_hl04_context.uart_diag_prev_rx_event_count;
+            uint32_t new_rx_bytes = diag.dma_bytes_received - g_arm_hl04_context.uart_diag_prev_bytes_received;
+            uint32_t new_read_bytes = diag.fifo_bytes_read - g_arm_hl04_context.uart_diag_prev_bytes_read;
+            uint32_t new_uart_errors = diag.uart_error_count - g_arm_hl04_context.uart_diag_prev_error_count;
+            uint8_t dma_position_changed =
+                ((g_arm_hl04_context.uart_diag_have_dma_position == 0U && diag.dma_position != 0U) ||
+                 (g_arm_hl04_context.uart_diag_have_dma_position != 0U &&
+                  diag.dma_position != g_arm_hl04_context.uart_diag_prev_dma_position));
+
+            if (diag.rx_active == 0U || diag.dma_active == 0U)
+                classification = "RX_NOT_ACTIVE";
+            else if (new_uart_errors != 0U)
+                classification = "UART_HARDWARE_ERROR";
+            else if (dma_position_changed != 0U && new_rx_events == 0U)
+                classification = "DMA_MOVED_NO_CALLBACK";
+            else if (new_rx_events != 0U && new_rx_bytes == 0U)
+                classification = "RX_EVENT_NO_BYTE_DELTA";
+            else if (new_rx_bytes != 0U && new_read_bytes == 0U)
+                classification = "BYTES_RECEIVED_NOT_READ";
+            else if (new_read_bytes != 0U && g_arm_hl04_context.parser.packet_count == 0U)
+                classification = "BYTES_READ_NO_VALID_FRAME";
+
+            g_arm_hl04_context.uart_diag_prev_dma_position = diag.dma_position;
+            g_arm_hl04_context.uart_diag_prev_rx_event_count = diag.rx_event_count;
+            g_arm_hl04_context.uart_diag_prev_bytes_received = diag.dma_bytes_received;
+            g_arm_hl04_context.uart_diag_prev_bytes_read = diag.fifo_bytes_read;
+            g_arm_hl04_context.uart_diag_prev_error_count = diag.uart_error_count;
+            g_arm_hl04_context.uart_diag_have_dma_position = 1U;
+
+            if (g_arm_hl04_context.parser.packet_count != 0U)
+            {
+                g_arm_hl04_context.uart_data_detected_logged = 1U;
+                LOG_I("HL04 UART data detected: baud=%lu bytes=%lu events=%lu frames=%lu",
+                      (unsigned long)g_arm_hl04_context.uart_current_baud,
+                      (unsigned long)diag.dma_bytes_received, (unsigned long)diag.rx_event_count,
+                      (unsigned long)g_arm_hl04_context.parser.packet_count);
+            }
+            else
+            {
+                LOG_W("HL04 RX[%s] +B=%lu +E=%lu +R=%lu fifo=%lu dma=%lu/%lu", classification,
+                      (unsigned long)new_rx_bytes, (unsigned long)new_rx_events, (unsigned long)new_read_bytes,
+                      (unsigned long)diag.fifo_depth, (unsigned long)diag.dma_position,
+                      (unsigned long)diag.dma_buffer_size);
+                LOG_W("HL04 ERR +%lu total=%lu last=%08lX", (unsigned long)new_uart_errors,
+                      (unsigned long)diag.uart_error_count, (unsigned long)diag.last_error_code);
+                LOG_W("HL04 ERRBITS ORE=%lu FE=%lu NE=%lu PE=%lu DMA=%lu",
+                      (unsigned long)diag.overrun_error_count, (unsigned long)diag.frame_error_count,
+                      (unsigned long)diag.noise_error_count, (unsigned long)diag.parity_error_count,
+                      (unsigned long)diag.dma_error_count);
+                LOG_W("HL04 DMA starts=%lu discard=%lu drop=%lu fail=%lu", (unsigned long)diag.dma_start_count,
+                      (unsigned long)diag.fifo_bytes_discarded_on_restart, (unsigned long)diag.fifo_bytes_dropped,
+                      (unsigned long)diag.rx_start_failure_count);
+                LOG_W("HL04 HW rx=%02X dm=%02X pos=%lu/%lu ndtr=%lu", (unsigned)diag.uart_rx_state,
+                      (unsigned)diag.dma_state, (unsigned long)diag.dma_position,
+                      (unsigned long)diag.dma_buffer_size, (unsigned long)diag.dma_remaining);
+                LOG_W("HL04 RAW0 n=%u: %02X %02X %02X %02X %02X %02X %02X %02X",
+                      (unsigned)diag.recent_byte_count,
+                      diag.recent_bytes[0], diag.recent_bytes[1], diag.recent_bytes[2], diag.recent_bytes[3],
+                      diag.recent_bytes[4], diag.recent_bytes[5], diag.recent_bytes[6], diag.recent_bytes[7]);
+                LOG_W("HL04 RAW1: %02X %02X %02X %02X %02X %02X %02X %02X",
+                      diag.recent_bytes[8], diag.recent_bytes[9], diag.recent_bytes[10], diag.recent_bytes[11],
+                      diag.recent_bytes[12], diag.recent_bytes[13], diag.recent_bytes[14], diag.recent_bytes[15]);
+                LOG_W("HL04 PARSE state=%u idx=%u frames=%lu err=%lu", (unsigned)g_arm_hl04_context.parser.state,
+                      (unsigned)g_arm_hl04_context.parser.index,
+                      (unsigned long)g_arm_hl04_context.parser.packet_count,
+                      (unsigned long)g_arm_hl04_context.parser.frame_error_count);
+            }
+        }
+    }
+
+#if (ARM_DUAL_IMU_UART_RECOVERY_ENABLE != 0)
+    if (g_arm_hl04_context.parser.packet_count == 0U && g_arm_hl04_context.uart_recovery_attempted == 0U &&
+        (tx_time_get() - g_arm_hl04_context.uart_start_tick) >= ARM_DUAL_IMU_UART_STARTUP_GRACE_MS)
+    {
+        g_arm_hl04_context.uart_recovery_attempted = 1U;
+        uint32_t previous_baud = g_arm_hl04_context.uart_current_baud;
+        uint32_t recovery_baud = (previous_baud == ARM_DUAL_IMU_UART_FALLBACK_BAUD)
+                                     ? previous_baud
+                                     : ARM_DUAL_IMU_UART_FALLBACK_BAUD;
+        if (arm_hl04_uart_set_baud(recovery_baud) != 0U)
+        {
+            LOG_W("HL04 UART recovery: baud %lu -> %lu after %lu ms", (unsigned long)previous_baud,
+                  (unsigned long)recovery_baud, (unsigned long)ARM_DUAL_IMU_UART_STARTUP_GRACE_MS);
+        }
+        else
+        {
+            LOG_E("HL04 UART recovery failed");
+        }
+    }
+#endif
+
     arm_hl04_can_poll(&g_arm_hl04_context);
 }

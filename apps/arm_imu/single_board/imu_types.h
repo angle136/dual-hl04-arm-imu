@@ -4,13 +4,13 @@
 #include <stdint.h>
 
 #define ARM_DUAL_IMU_IK_DOF 6U
+#define ARM_DUAL_IMU_PROTOCOL_DOF 7U
 
 /**
  * @brief 三 IMU 人体手臂映射结果。
  *
  * @note target_position_m / target_rotation 是机械臂末端目标位姿。
- * @note legacy_joint_target_rad 沿用 YUAN 版解析逆解坐标，目前只用于观测，
- *       尚未换算为本工程 J1~J6 的电机关节坐标，也不会直接驱动电机。
+ * @note protocol_joint_target_rad 严格使用 arm_small_machine 的 J1~J7 协议角契约。
  */
 typedef struct
 {
@@ -22,7 +22,7 @@ typedef struct
     uint8_t  calibrated;
     uint8_t  pose_valid;
     uint8_t  ik_valid;
-    uint8_t  reserved;
+    uint8_t  protocol_valid;
     uint32_t zero_count;
     uint32_t upper_last_rx_tick;
     uint32_t upper_packet_count;
@@ -41,8 +41,17 @@ typedef struct
     float    elbow_position_m[3];
     float    wrist_position_m[3];
     float    target_position_m[3];
+    float    robot_target_position_m[3];
     float    target_rotation[3][3];
-    float    legacy_joint_target_rad[ARM_DUAL_IMU_IK_DOF];
+    float    legacy_joint_target_rad[ARM_DUAL_IMU_IK_DOF]; /* compatibility mirror of protocol J1~J6 */
+    float    raw_joint_target_rad[ARM_DUAL_IMU_PROTOCOL_DOF];
+    float    protocol_joint_target_rad[ARM_DUAL_IMU_PROTOCOL_DOF];
+    float    wrist_pitch_rad;
+    float    ik_position_error_m;
+    float    ik_rotation_error_rad;
+    float    ik_position_scale;
+    uint8_t  ik_iterations;
+    uint8_t  ik_attempt;
 } Arm_Dual_Imu_State_t;
 
 #endif /* _ARM_IMU_TYPES_H_ */

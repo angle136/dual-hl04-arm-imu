@@ -33,6 +33,15 @@ typedef struct
     float   euler_rad[3];   // roll pitch yaw(rad)
     float   YawTotalAngle_rad;
     int32_t YawRoundCount;
+    // BMI088 静止零偏跟踪状态，供 Ozone 和 APP 诊断。
+    float gyro_input_rad_s[3];
+    float gyro_corrected_rad_s[3];
+    float gyro_bias_online_rad_s[3];
+    float accel_norm_m_s2;
+    float gyro_norm_rad_s;
+    float stationary_time_s;
+    float temperature_c;
+    uint8_t stationary;
     // 采样时间间隔
     float    dt;
     uint32_t dwt_cnt;

@@ -12,6 +12,13 @@
 #define INS_ACCEL_LPF_COEF 0.0085f // 加速度低通滤波系数
 #define GRAVITY_CONSTANT   9.81f   // 重力加速度常数
 
+/* 静止后缓慢跟踪 BMI088 随温度变化的残余零偏。阈值使用模长，不依赖传感器安装方向。 */
+#define INS_STATIONARY_ACCEL_GATE_M_S2  0.25f
+#define INS_STATIONARY_GYRO_GATE_RAD_S  0.02f
+#define INS_STATIONARY_CONFIRM_TIME_S   1.0f
+#define INS_ONLINE_BIAS_TIME_CONSTANT_S 5.0f
+#define INS_ONLINE_BIAS_LIMIT_RAD_S     0.05f
+
 static Ins_t                      ins;               /* INS状态结构体 */
 static Bmi088_device_t           *bmi088_dev = NULL; /* BMI088设备指针 */
 static Ins_param_t                IMU_Param;         /* 陀螺仪参数结构体 */
@@ -26,6 +33,57 @@ static const float zb[3] = {0.0f, 0.0f, 1.0f};
 static const float gravity[3] = {0.0f, 0.0f, GRAVITY_CONSTANT};
 
 /* 内部算法函数 */
+
+static float Clamp(float value, float minimum, float maximum)
+{
+    if (value < minimum) return minimum;
+    if (value > maximum) return maximum;
+    return value;
+}
+
+/**
+ * @brief 静止确认后在线估计三轴残余陀螺零偏，并输出补偿后的角速度。
+ * @note 六轴 IMU 无法区分极慢的匀速航向运动和零偏，因此使用较低角速度门限、1 s 确认及 5 s 时间常数抑制误学习。
+ */
+static void UpdateStationaryGyroBias(const float gyro_input[3], const float accel[3], float dt, float gyro_corrected[3])
+{
+    float accel_norm_sq = 0.0f;
+    float gyro_norm_sq  = 0.0f;
+    for (uint8_t i = 0U; i < 3U; ++i)
+    {
+        accel_norm_sq += accel[i] * accel[i];
+        gyro_corrected[i] = gyro_input[i] - ins.gyro_bias_online_rad_s[i];
+        gyro_norm_sq += gyro_corrected[i] * gyro_corrected[i];
+        ins.gyro_input_rad_s[i] = gyro_input[i];
+    }
+
+    ins.accel_norm_m_s2 = sqrtf(accel_norm_sq);
+    ins.gyro_norm_rad_s = sqrtf(gyro_norm_sq);
+
+    if (dt <= 0.0f || dt > 0.1f || fabsf(ins.accel_norm_m_s2 - GRAVITY_CONSTANT) > INS_STATIONARY_ACCEL_GATE_M_S2 ||
+        ins.gyro_norm_rad_s > INS_STATIONARY_GYRO_GATE_RAD_S)
+    {
+        ins.stationary        = 0U;
+        ins.stationary_time_s = 0.0f;
+    }
+    else
+    {
+        ins.stationary_time_s += dt;
+        if (ins.stationary_time_s >= INS_STATIONARY_CONFIRM_TIME_S)
+        {
+            ins.stationary = 1U;
+            float alpha    = dt / (INS_ONLINE_BIAS_TIME_CONSTANT_S + dt);
+            for (uint8_t i = 0U; i < 3U; ++i)
+            {
+                ins.gyro_bias_online_rad_s[i] = Clamp(ins.gyro_bias_online_rad_s[i] + alpha * gyro_corrected[i],
+                                                       -INS_ONLINE_BIAS_LIMIT_RAD_S, INS_ONLINE_BIAS_LIMIT_RAD_S);
+                gyro_corrected[i] = gyro_input[i] - ins.gyro_bias_online_rad_s[i];
+            }
+        }
+    }
+
+    for (uint8_t i = 0U; i < 3U; ++i) ins.gyro_corrected_rad_s[i] = gyro_corrected[i];
+}
 
 // 三维向量归一化
 float *Norm3d(float *v)
@@ -204,11 +262,16 @@ static void ins_task_entry(ULONG arg)
             Module_BMI088_get_gyro();
 
             // IMU参数修正（安装误差修正）
-            IMU_Param_Correction(bmi088_dev->gyro, bmi088_dev->acc);
+            float gyro[3] = {bmi088_dev->gyro[0], bmi088_dev->gyro[1], bmi088_dev->gyro[2]};
+            float accel[3] = {bmi088_dev->acc[0], bmi088_dev->acc[1], bmi088_dev->acc[2]};
+            IMU_Param_Correction(gyro, accel);
+
+            // 固定 Flash 标定只覆盖标定温度；静止时继续跟踪当前温度下的三轴残余零偏。
+            float gyro_corrected[3];
+            UpdateStationaryGyroBias(gyro, accel, ins.dt, gyro_corrected);
 
             // 核心函数,EKF更新四元数
-            IMU_QuaternionEKF_Update(bmi088_dev->gyro[0], bmi088_dev->gyro[1], bmi088_dev->gyro[2], bmi088_dev->acc[0], bmi088_dev->acc[1],
-                                     bmi088_dev->acc[2], ins.dt);
+            IMU_QuaternionEKF_Update(gyro_corrected[0], gyro_corrected[1], gyro_corrected[2], accel[0], accel[1], accel[2], ins.dt);
 
             // 复制四元数结果
             memcpy(ins.q, QEKF_INS.q, sizeof(QEKF_INS.q));
@@ -225,7 +288,7 @@ static void ins_task_entry(ULONG arg)
             // 计算运动加速度（去除重力分量），并进行低通滤波
             for (uint8_t i = 0; i < 3; ++i)
             {
-                const float acc_diff = bmi088_dev->acc[i] - gravity_b[i];
+                const float acc_diff = accel[i] - gravity_b[i];
                 ins.MotionAccel_b[i] = acc_diff * ins.dt / (ins.AccelLPF + ins.dt) + ins.MotionAccel_b[i] * ins.AccelLPF / (ins.AccelLPF + ins.dt);
             }
 
@@ -244,6 +307,7 @@ static void ins_task_entry(ULONG arg)
             ins.YawRoundCount     = QEKF_INS.YawRoundCount;
 
             Module_BMI088_get_temp();
+            ins.temperature_c = bmi088_dev->temperature;
             // 温度控制
             Module_BMI088_temp_ctrl();
             tx_thread_sleep(1);
